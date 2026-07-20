@@ -1,0 +1,114 @@
+discovery:
+  period: 30d             # 24h | 7d | 30d | all — 30d so always_follow leaders inactive in past 7d still show ranked metrics
+  top_n: 4                # auto-discovered slots; 4 + 5 always_follow = 9 (HL hard cap)
+  min_trades: 50
+  min_volume_usd: 5000
+  min_pnl_usd: 100
+  refresh_seconds: 600
+  # Quality filter (PR #13): screens leaders by holding-time + direction consistency
+  # to catch scalpers and flip-floppers that raw PnL ranking misses.
+  use_quality_filter: true
+  score_lookback_hours: 720          # 30d — matches discovery.period to keep ranking + quality scoring on the same window
+  # Tuned 2026-05-06 from live probe: 20s + sharpe 0.1 + dir 0.55 keeps fast-but-edged
+  # perp leaders. Perp bias is critical (PR #15): HL leaderboard is dominated by
+  # HIP-4 outcome traders, and bot trades perp-only — without perp bias, leaders
+  # fire constantly but every fill gets filter-skipped on market type.
+  min_holding_time_s: 10
+  min_sharpe: 0.1                    # require some realized edge, not just non-negative
+  min_direction_consistency: 0.55    # 0.5 = pure flip-flop
+  # 2026-05-10: relaxed back to 0.5 from 0.99. Single-leader mode produced
+  # 30+ hours of idle (rank 31 quiet on weekends, no oil session). Active
+  # quality leaders (rank 9 0x051c2e6d, rank 20 0x6cd520c1) score ~85-100%
+  # perp on 24h activity but 7d window dilutes them. 0.5 captures the active
+  # generalists while still rejecting outcome-specialists (HL leaderboard
+  # is ~60% outcome flow per 2026-05-06 probe).
+  score_perp_only: true
+  min_perp_fraction: 0.5
+  # Operator override: RWA-heavy leaders that fail the perp-bias filter
+  # (because their xyz:* tokenized-stock activity is dwarfed by their HIP-4
+  # outcome activity in raw fill counts) but who passed leader_score on their
+  # RWA-only fills. Probed 2026-05-06 against top-50 leaderboard:
+  #   - 0x8607a7d180… rank 31, $2,297, pure xyz:CL specialist
+  #     (28h median hold, sharpe 1.13, dir 1.00)
+  #   - 0x312a8bd562… rank 38, $1,997, paper-stocks basket
+  #     (1.7h median hold, sharpe 0.17, dir 0.61)
+  always_follow:
+    # PR #36 backtest 2026-05-23: simulated 30d copy-trade with our sizing —
+    # only 3 of 5 leaders had positive net edge. Dropped 0x051c2e6d
+    # (4% hit rate, Sharpe -2.30, -$1550 simulated, CHIP wrecked them)
+    # and 0xe0d28485 (24% hit rate, Sharpe -0.68, -$757 simulated).
+    # Liquidiction's aggregate PnL was misleading for both — they earn
+    # on outcomes/non-perp surfaces we don't mirror.
+    #
+    # rank 36 (was 31) — xyz:CL specialist, weekly oil session trader.
+    # Backtest: +$769 / 82% hit rate / Sharpe +0.73 — REAL EDGE (xyz domain)
+    - "0x8607a7d180de23645db594d90621d837749408d5"
+    # rank 20 — recurring quality: gave us PENDLE +$1.86 on 2026-05-06.
+    # Backtest: +$60 net but Sharpe 0.04 (coin flip), kept at lower weight
+    - "0x6cd520c1a07c9b53b33d62d04d3c2a3175161968"
+    # rank 42 — SOL perp specialist. DROPPED 2026-07-20: 30d backtest = 0 trades
+    # (dead slot). Freed for auto-discovery; re-add only on positive evidence.
+    # - "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8"
+  # Per-leader sizing weights — recalibrated from PR #36 backtest evidence.
+  use_sharpe_weighting: true
+  leader_weights:
+    # Oil specialist — 2026-07-20: edge evaporated. 30d net +$0.07, sharpe 0.00,
+    # maxDD $596.95 (SKHX -$531 vs LIT +$505 = pure noise). Cut 2.0 → 1.5.
+    "0x8607a7d180de23645db594d90621d837749408d5": 1.5
+    # 2026-07-20: sole real earner in cohort — 30d net +$20.69, sharpe +0.10,
+    # maxDD $22.56 (<2x net), 56% hit. Bumped 1.0 → 1.5 to concentrate on edge.
+    "0x6cd520c1a07c9b53b33d62d04d3c2a3175161968": 1.5
+    # Dropped from always_follow 2026-07-20 (0 trades / dead slot).
+    # "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8": 1.2
+
+sizing:
+  mode: fixed             # 2026-07-05: proportional→fixed per Neil "shoot $10 orders"
+  proportional_fraction: 0.05
+  fixed_usd: 10           # 2026-07-05: 25→10 — every mirror clip = $10 (HL minimum)
+  max_per_trade_usd: 50           # 2026-07-05: 100→50 (was 40% of ~$250 book; MU stack-down lesson)
+  min_per_trade_usd: 10           # HL enforces $10 min on perp orders too (e.g. asset=214 ZEC); was 1, kept rejecting fills
+  outcome_min_per_trade_usd: 10   # HL HIP-4 enforces $10 USDH min order value
+  ioc_slippage_bps: 50    # 0.5% slippage on IOC limit price; range [0, 1000]
+  # PR #19: funding-aware sizing. When mirroring perps, factor in current
+  # funding rate. Above amplify_threshold (favorable, we get paid funding) →
+  # boost size linearly to amplify_cap. Below skip_threshold (we'd PAY a lot
+  # of funding) → skip the trade. Outcomes ignored (settle once at expiry).
+  use_funding_aware_sizing: true
+  funding_amplify_threshold_apr_pct: 20.0   # below this favorable APR: no boost
+  funding_amplify_cap: 1.5                  # max 1.5x size on extreme positive funding
+  funding_skip_threshold_apr_pct: 100.0     # above this adverse APR: skip the trade
+
+risk:
+  dry_run: false
+  max_total_exposure_usd: 350   # 2026-07-05: 600→350 (~1.4x book; was 2.4x, de-risking after over-leverage)
+  max_daily_loss_usd: 30    # 2026-07-05: tightened from 150 (~60% of ~$250 book) to ~12% circuit-breaker    # 2026-07-05: tightened from 150 (~60% of ~$250 book) to ~12% circuit-breaker
+  allowed_market_types: [perp]   # outcome | perp | spot — perp-only this run (no USDH balance for outcomes)
+  kill_switch_file: ./KILL
+  # PR #30 auto-close: validated 2026-05-21 — WLD orphan correctly detected,
+  # detection logic + closing path both work. Switching from alert-only to
+  # autonomous close so we don't need operator hand-holding on each event.
+  leader_exit_auto_close: true
+  leader_exit_debounce_cycles: 2
+  # Manual positions opened outside the bot. LeaderReconciler skips these so
+  # operator-managed trades don't get flagged as orphans + auto-closed.
+  # Match exactly (case-insensitive).
+  manual_holdings:
+    - "#1420"      # 2026 NBA Finals — Spurs side (manual outcome bet)
+    - "#1430"      # NBA Finals Game 1 — Spurs side (manual outcome bet)
+    - "xyz:SPCX"   # SpaceX long on xyz builder dex (manual HIP-3 trade)
+
+network:
+  hyperliquid_env: mainnet
+  liquidiction_base: https://liquidiction.xyz
+
+ops:
+  state_db: ./state/state.db
+  journal_path: ./state/journal.jsonl
+  log_level: INFO
+  log_json: false
+  # 120s was triggering on routine HL connection cycles; 300s keeps real
+  # disconnect signals while cutting the spam (raised 2026-05-10 after
+  # /start enabled bot alerts to Telegram).
+  ws_stale_threshold_s: 300
+  alert_min_level: error  # info | warn | error | critical — bumped 2026-05-10
+                          # to suppress routine WS-stale "warn" events.
