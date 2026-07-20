@@ -52,9 +52,10 @@ discovery:
   # Per-leader sizing weights — recalibrated from PR #36 backtest evidence.
   use_sharpe_weighting: true
   leader_weights:
-    # Oil specialist — 2026-07-20: edge evaporated. 30d net +$0.07, sharpe 0.00,
-    # maxDD $596.95 (SKHX -$531 vs LIT +$505 = pure noise). Cut 2.0 → 1.5.
-    "0x8607a7d180de23645db594d90621d837749408d5": 1.5
+    # Oil specialist — 2026-07-20: edge still absent. 30d net +$28.63 but
+    # maxDD $431.38 (~15x net) = LIT +$392 vs SKHX -$384 pure offsetting noise,
+    # sharpe +0.02. LOSER rule (maxDD>4x net). Cut 2.0→1.5 earlier, now 1.5→1.0.
+    "0x8607a7d180de23645db594d90621d837749408d5": 1.0
     # 2026-07-20: sole real earner in cohort — 30d net +$20.69, sharpe +0.10,
     # maxDD $22.56 (<2x net), 56% hit. Bumped 1.0 → 1.5 to concentrate on edge.
     "0x6cd520c1a07c9b53b33d62d04d3c2a3175161968": 1.5
