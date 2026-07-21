@@ -62,7 +62,10 @@ discovery:
     "0x8607a7d180de23645db594d90621d837749408d5": 0.1
     # 2026-07-20: sole real earner in cohort — 30d net +$20.69, sharpe +0.10,
     # maxDD $22.56 (<2x net), 56% hit. Bumped 1.0 → 1.5 to concentrate on edge.
-    "0x6cd520c1a07c9b53b33d62d04d3c2a3175161968": 1.5
+    # 2026-07-21: edge evaporated in one day — 30d net flipped +$20.69 → -$2.33,
+    # sharpe +0.10 → -0.00, 56% → 50% hit (coin flip), maxDD $29.51. Now a LOSER
+    # (net<0). Reverse yesterday's concentration bump: 1.5 → 1.0.
+    "0x6cd520c1a07c9b53b33d62d04d3c2a3175161968": 1.0
     # Dropped from always_follow 2026-07-20 (0 trades / dead slot).
     # "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8": 1.2
 
