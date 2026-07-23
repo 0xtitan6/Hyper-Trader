@@ -41,8 +41,12 @@ discovery:
     # on outcomes/non-perp surfaces we don't mirror.
     #
     # rank 36 (was 31) — xyz:CL specialist, weekly oil session trader.
-    # Backtest: +$769 / 82% hit rate / Sharpe +0.73 — REAL EDGE (xyz domain)
-    - "0x8607a7d180de23645db594d90621d837749408d5"
+    # DROPPED 2026-07-23: LOSER re-confirmed 4th consecutive run. 30d net
+    # +$55.83 but maxDD $429.45 (7.7x net), sharpe +0.04, 43% hit = pure
+    # offsetting noise (LIT +$392 vs SKHX -$319). Muted at 0.1 floor since
+    # 07-21 (~$1 clips skipped below min_per_trade_usd). Measurement complete —
+    # freeing HL-cap slot for quality auto-discovery. Re-add only on positive evidence.
+    # - "0x8607a7d180de23645db594d90621d837749408d5"
     # rank 20 — recurring quality: gave us PENDLE +$1.86 on 2026-05-06.
     # Backtest: +$60 net but Sharpe 0.04 (coin flip), kept at lower weight
     - "0x6cd520c1a07c9b53b33d62d04d3c2a3175161968"
@@ -57,9 +61,10 @@ discovery:
     # offsetting noise, sharpe +0.04, 42% hit (coin flip). LOSER rule
     # (maxDD>4x net) re-confirmed 3x. Trajectory 2.0→1.5→1.0→0.5, now 0.5→0.1
     # (0.1 = config floor; at fixed $10 sizing this yields ~$1 clips that fall
-    # below min_per_trade_usd $10 and get skipped = effective mute. Kept in
-    # always_follow for continued measurement).
-    "0x8607a7d180de23645db594d90621d837749408d5": 0.1
+    # below min_per_trade_usd $10 and get skipped = effective mute).
+    # 2026-07-23: dropped from always_follow entirely — LOSER 4x confirmed
+    # (net +$55.83 / maxDD $429.45 / sharpe +0.04). Weight removed.
+    # "0x8607a7d180de23645db594d90621d837749408d5": 0.1
     # 2026-07-20: sole real earner in cohort — 30d net +$20.69, sharpe +0.10,
     # maxDD $22.56 (<2x net), 56% hit. Bumped 1.0 → 1.5 to concentrate on edge.
     # 2026-07-21: edge evaporated in one day — 30d net flipped +$20.69 → -$2.33,
