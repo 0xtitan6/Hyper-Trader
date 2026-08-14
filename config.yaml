@@ -13,7 +13,17 @@ discovery:
   # perp leaders. Perp bias is critical (PR #15): HL leaderboard is dominated by
   # HIP-4 outcome traders, and bot trades perp-only — without perp bias, leaders
   # fire constantly but every fill gets filter-skipped on market type.
-  min_holding_time_s: 10
+  # 2026-08-14 RAISED 10 -> 120. Safety fix for the fixed_usd 10->30 change made
+  # the same evening. At $10 clips, high-frequency leaders were harmless: every
+  # clip floor-rounded to $9.9x, failed the $10 minimum, and was silently dropped.
+  # At $30 clips those same fills CLEAR the minimum and become real orders — and
+  # auto-discovery had already selected 0x25773676, which does ~2.43M fills/30d
+  # (~0.94/sec). That would fire tens of thousands of live $30 orders per day,
+  # churning fees against a cap that reduce-only exits keep resetting.
+  # 120s p50 blocks sub-second scalpers by ~100x while leaving our actual leaders
+  # (0x819d06c0 ~8 fills/day, 0x9551e7d4 ~22 fills/day) far above the line.
+  # Code's own default is 300s; 120 is the conservative middle.
+  min_holding_time_s: 120
   min_sharpe: 0.1                    # require some realized edge, not just non-negative
   min_direction_consistency: 0.55    # 0.5 = pure flip-flop
   # 2026-05-10: relaxed back to 0.5 from 0.99. Single-leader mode produced
@@ -50,6 +60,11 @@ discovery:
     # rank 20 — recurring quality: gave us PENDLE +$1.86 on 2026-05-06.
     # Backtest: +$60 net but Sharpe 0.04 (coin flip), kept at lower weight
     - "0x6cd520c1a07c9b53b33d62d04d3c2a3175161968"
+    # 2026-08-14: PINNED. Best risk-adjusted leader we have ever measured —
+    # 30d backtest at $200 proxy: 1879 trades, 80% hit, sharpe +0.59,
+    # +$18.29 net, maxDD only $1.24. Was auto-discovered only, so any
+    # discovery refresh could rotate it out. Pinning protects the edge.
+    - "0x819d06c03a978a86d6884b11fbca4d228ea0d106"
     # rank 42 — SOL perp specialist. DROPPED 2026-07-20: 30d backtest = 0 trades
     # (dead slot). Freed for auto-discovery; re-add only on positive evidence.
     # - "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8"
@@ -71,14 +86,17 @@ discovery:
     # sharpe +0.10 → -0.00, 56% → 50% hit (coin flip), maxDD $29.51. Now a LOSER
     # (net<0). Reverse yesterday's concentration bump: 1.5 → 1.0.
     "0x6cd520c1a07c9b53b33d62d04d3c2a3175161968": 1.0
+    # 2026-08-14: concentrate on the sharpe leader (0.59 vs 0.26). Auto-weighting
+    # had it at 1.36; 1.5 is a modest deliberate bump, not a new regime.
+    "0x819d06c03a978a86d6884b11fbca4d228ea0d106": 1.5
     # Dropped from always_follow 2026-07-20 (0 trades / dead slot).
     # "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8": 1.2
 
 sizing:
   mode: fixed             # 2026-07-05: proportional→fixed per Neil "shoot $10 orders"
   proportional_fraction: 0.05
-  fixed_usd: 10           # 2026-07-05: 25→10 — every mirror clip = $10 (HL minimum)
-  max_per_trade_usd: 50           # 2026-07-05: 100→50 (was 40% of ~$250 book; MU stack-down lesson)
+  fixed_usd: 30           # 2026-08-14: 10→30 for the $1,000 mission (see risk: block)
+  max_per_trade_usd: 120          # 2026-08-14: 50→120, in step with fixed_usd 10→30
   min_per_trade_usd: 10           # HL enforces $10 min on perp orders too (e.g. asset=214 ZEC); was 1, kept rejecting fills
   outcome_min_per_trade_usd: 10   # HL HIP-4 enforces $10 USDH min order value
   ioc_slippage_bps: 50    # 0.5% slippage on IOC limit price; range [0, 1000]
@@ -93,8 +111,16 @@ sizing:
 
 risk:
   dry_run: false
-  max_total_exposure_usd: 350   # 2026-07-05: 600→350 (~1.4x book; was 2.4x, de-risking after over-leverage)
-  max_daily_loss_usd: 30    # 2026-07-05: tightened from 150 (~60% of ~$250 book) to ~12% circuit-breaker    # 2026-07-05: tightened from 150 (~60% of ~$250 book) to ~12% circuit-breaker
+  # 2026-08-14: Neil set the $1,000-by-Aug-31 mission and reaffirmed twice
+  # ("I don't care how"). Amplifying the ONLY edge we have evidence for (the
+  # copy strategy) by raising gross exposure 350→800 (~4x book on $200.80).
+  # Scales the 30d backtest run rate (+25.2%/mo, itself an UPPER BOUND) by
+  # 2.29x, and scales portfolio maxDD to ~12% of account. This does NOT reach
+  # $1,000 — projects ~$260 by Aug 31. Revert values in /tmp/config.yaml.bak-2240.
+  max_total_exposure_usd: 800
+  # Raised 30→80 in step with size: at 4x book the old $30 breaker would trip
+  # on routine variance and halt trading. $80 = ~40% of account in one day.
+  max_daily_loss_usd: 80
   allowed_market_types: [perp]   # outcome | perp | spot — perp-only this run (no USDH balance for outcomes)
   kill_switch_file: ./KILL
   # PR #30 auto-close: validated 2026-05-21 — WLD orphan correctly detected,
