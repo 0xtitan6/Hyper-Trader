@@ -182,11 +182,14 @@ def test_unknown_leader_uses_default_weight(
     cfg2 = _override_risk(cfg, dry_run=False)
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
     mt.update_leader_weights({"0xother": 5.0})
-    fill = {"tid": 1, "coin": "#11", "px": "0.50", "sz": "100", "side": "B"}
+    # Deliberately 2x the $5 min: a clip sitting exactly ON min_per_trade_usd
+    # now triggers the sub-minimum rescue (2026-08-14), which would make this
+    # weight assertion about rounding instead of about weights.
+    fill = {"tid": 1, "coin": "#11", "px": "1.00", "sz": "100", "side": "B"}
     mt.on_leader_fill("0xnotinmap", fill)
     args, _ = exchange.order.call_args
     sz = args[2]
-    # No weight applied: $50 leader notional x 0.10 = $5 mirror / 0.50 = 10
+    # No weight applied: $100 leader notional x 0.10 = $10 mirror / 1.00 = 10
     assert sz == 10.0
 
 
@@ -1081,3 +1084,261 @@ def test_accepted_order_reserves_in_flight(
     mt.on_leader_fill("0xleader", outcome_fill)
     assert len(mt._in_flight) == 1
     positions.state.set_position_originator.assert_called_once()
+
+
+# ---------- sub-minimum rounding rescue + distinct skip reasons ----------
+# Incident 2026-07-21 → 2026-08-14. Leader 0x6cd520c1's weight was cut
+# 1.5 → 1.0, making the fixed clip exactly $10.00 against a $10.00 minimum.
+# Floor-rounding the size to szDecimals took the notional to $9.9x, the
+# post-round min check discarded it, and the leader was silently muted for
+# 24 days: 10,706 fills filtered vs 79 orders accepted. Every skip journalled
+# the same opaque reason ("filter", 2,449,814 of them), so nothing surfaced.
+
+
+def _skip_reasons(journal) -> list[str]:
+    """All intent_skipped reasons written to the journal, in order."""
+    import json
+    from pathlib import Path
+
+    if not Path(journal.path).exists():
+        return []
+    out = []
+    for line in Path(journal.path).read_text().splitlines():
+        e = json.loads(line)
+        if e.get("event") == "intent_skipped":
+            out.append(e["reason"])
+    return out
+
+
+def _journal_events(journal, event: str) -> list[dict]:
+    import json
+    from pathlib import Path
+
+    if not Path(journal.path).exists():
+        return []
+    return [
+        e
+        for e in (json.loads(ln) for ln in Path(journal.path).read_text().splitlines())
+        if e.get("event") == event
+    ]
+
+
+def _perp_mt(cfg, exchange, positions, journal, alerter, market_meta, **sizing):
+    cfg2 = _override_sizing(cfg, **sizing)
+    cfg2 = _override_risk(cfg2, dry_run=False, allowed_market_types=["perp"])
+    return MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+
+
+def test_exact_min_clip_at_weight_one_still_trades(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """THE regression: fixed_usd=$10 x weight 1.0 = exactly the $10 minimum.
+
+    ETH szDecimals=4 @ $3000 → raw 0.0033333 → floors to 0.0033 = $9.90, which
+    the old code silently discarded. Must now round up one step and submit."""
+    mt = _perp_mt(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        mode="fixed", fixed_usd=10.0, min_per_trade_usd=10.0, max_per_trade_usd=100.0,
+    )
+    mt.update_leader_weights({"0x6cd520c1": 1.0})
+    mt.on_leader_fill("0x6cd520c1", {"tid": 1, "coin": "ETH", "px": "3000", "sz": "5", "side": "B"})
+    exchange.order.assert_called_once()
+    sz = exchange.order.call_args.args[2]
+    assert abs(sz - 0.0034) < 1e-12  # one szDecimals step up from 0.0033
+    assert _skip_reasons(journal) == []
+
+
+def test_rescue_lands_above_min_not_exactly_on_it(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """HL values orders with its OWN reference price (30d: 199 rejects, all at
+    exactly $10.00 intent notional), so the rescue must clear the floor with
+    margin, not land on it."""
+    mt = _perp_mt(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        mode="fixed", fixed_usd=10.0, min_per_trade_usd=10.0, max_per_trade_usd=100.0,
+    )
+    import src.mirror as mirror_mod
+
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "ETH", "px": "3000", "sz": "5", "side": "B"})
+    sz, px = exchange.order.call_args.args[2], 3000.0
+    assert sz * px >= 10.0 * (1 + mirror_mod.MIN_NOTIONAL_SAFETY_MARGIN)
+
+
+def test_rescue_journals_size_rounded_up(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """The bump must be auditable — an unlogged size change is how we got here."""
+    mt = _perp_mt(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        mode="fixed", fixed_usd=10.0, min_per_trade_usd=10.0, max_per_trade_usd=100.0,
+    )
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "ETH", "px": "3000", "sz": "5", "side": "B"})
+    events = _journal_events(journal, "size_rounded_up")
+    assert len(events) == 1
+    assert events[0]["from_sz"] == 0.0033 and events[0]["to_sz"] == 0.0034
+    assert events[0]["to_notional"] > events[0]["from_notional"]
+
+
+def test_strategist_weight_034_rearms_and_is_rescued(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """fixed_usd=$30 masks the bug at weight 1.0, but the strategist sets
+    weights automatically: at 0.34 the clip is $10.20 and re-arms it."""
+    mt = _perp_mt(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        mode="fixed", fixed_usd=30.0, min_per_trade_usd=10.0, max_per_trade_usd=100.0,
+    )
+    mt.update_leader_weights({"0xweak": 0.34})
+    mt.on_leader_fill("0xweak", {"tid": 1, "coin": "ETH", "px": "3100", "sz": "5", "side": "B"})
+    exchange.order.assert_called_once()
+    assert abs(exchange.order.call_args.args[2] - 0.0033) < 1e-12  # up from 0.0032
+
+
+def test_no_rescue_when_rounding_already_clears_min(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """A clip comfortably above the minimum is untouched — the rescue must not
+    inflate ordinary trades."""
+    mt = _perp_mt(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        mode="fixed", fixed_usd=30.0, min_per_trade_usd=10.0, max_per_trade_usd=100.0,
+    )
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "ETH", "px": "3000", "sz": "5", "side": "B"})
+    assert abs(exchange.order.call_args.args[2] - 0.01) < 1e-12  # 30/3000, exact
+    assert _journal_events(journal, "size_rounded_up") == []
+
+
+def test_rescue_skipped_when_bump_breaches_max_per_trade(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """max_per_trade_usd is the hard stop: rounding up only ever adds exposure,
+    so a bump that breaches the operator's cap must skip instead."""
+    mt = _perp_mt(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        mode="fixed", fixed_usd=10.0, min_per_trade_usd=10.0, max_per_trade_usd=10.1,
+    )
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "ETH", "px": "3000", "sz": "5", "side": "B"})
+    exchange.order.assert_not_called()  # bumped $10.20 > $10.10 cap
+    assert _skip_reasons(journal) == ["rounding:exceeds_max"]
+
+
+def test_rescue_allowed_when_bump_exactly_equals_max_per_trade(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Boundary: bumped notional == max_per_trade_usd is within the cap."""
+    mt = _perp_mt(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        mode="fixed", fixed_usd=10.0, min_per_trade_usd=10.0, max_per_trade_usd=10.2,
+    )
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "ETH", "px": "3000", "sz": "5", "side": "B"})
+    exchange.order.assert_called_once()
+    assert abs(exchange.order.call_args.args[2] - 0.0034) < 1e-12  # exactly $10.20
+
+
+def test_unrepresentably_small_clip_is_rescued_to_one_lot(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """szDecimals=0 outcome priced above our clip floors to zero size. Old code
+    dropped it; now we buy the single smallest lot if it fits under the cap."""
+    cfg2 = _override_sizing(cfg, min_per_trade_usd=5.0, max_per_trade_usd=100.0)
+    cfg2 = _override_risk(cfg2, dry_run=False)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    # $60 leader notional x 0.10 = $6 clip; one share costs $8 → raw sz 0.75
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "#11", "px": "8", "sz": "7.5", "side": "B"})
+    exchange.order.assert_called_once()
+    assert exchange.order.call_args.args[2] == 1.0
+
+
+def test_unrepresentably_small_clip_skips_when_one_lot_breaches_max(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """...but not when that single lot costs more than max_per_trade_usd."""
+    cfg2 = _override_sizing(cfg, min_per_trade_usd=5.0, max_per_trade_usd=7.0)
+    cfg2 = _override_risk(cfg2, dry_run=False)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "#11", "px": "8", "sz": "7.5", "side": "B"})
+    exchange.order.assert_not_called()  # one $8 share > $7 cap
+    assert _skip_reasons(journal) == ["rounding:exceeds_max"]
+
+
+def test_genuinely_sub_min_clip_is_never_sized_up(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """The safety property: the rescue only fires for clips the configured
+    weight/fraction already asked to be >= the minimum. A clip that is truly
+    below the minimum must still be discarded, never rounded up into one."""
+    mt = _perp_mt(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        mode="fixed", fixed_usd=10.0, min_per_trade_usd=10.0, max_per_trade_usd=100.0,
+    )
+    mt.update_leader_weights({"0xweak": 0.5})  # $5 clip vs $10 min
+    mt.on_leader_fill("0xweak", {"tid": 1, "coin": "ETH", "px": "3000", "sz": "5", "side": "B"})
+    exchange.order.assert_not_called()
+    assert _skip_reasons(journal) == ["sub_min"]
+
+
+# ---------- distinct skip reasons (no more opaque "filter") ----------
+
+
+def test_skip_reason_market_type(cfg, positions, journal, alerter, exchange, market_meta):
+    cfg2 = _override_risk(cfg, dry_run=False, allowed_market_types=["outcome"])
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "BTC", "px": "65000", "sz": "1", "side": "B"})
+    assert _skip_reasons(journal) == ["market_type"]
+
+
+def test_skip_reason_funding_skip(cfg, positions, journal, alerter, exchange, market_meta):
+    mt = _perp_mt(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        use_funding_aware_sizing=True, funding_skip_threshold_apr_pct=100.0,
+    )
+    mt.funding = _funding_stub({"BTC": 200.0})
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "BTC", "px": "100", "sz": "10", "side": "B"})
+    assert _skip_reasons(journal) == ["funding_skip"]
+
+
+def test_skip_reason_bad_fill_numbers(cfg, positions, journal, alerter, exchange, market_meta):
+    cfg2 = _override_risk(cfg, dry_run=False)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "#11", "px": "abc", "sz": "1", "side": "B"})
+    assert _skip_reasons(journal) == ["bad_fill_numbers"]
+
+
+def test_skip_reason_bad_fill_fields(cfg, positions, journal, alerter, exchange, market_meta):
+    cfg2 = _override_risk(cfg, dry_run=False)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "#11", "px": "0.5", "sz": "1", "side": "X"})
+    assert _skip_reasons(journal) == ["bad_fill_fields"]
+
+
+def test_skip_reason_bad_sizing_mode(cfg, positions, journal, alerter, exchange, market_meta):
+    cfg2 = _override_sizing(cfg, mode="nonsense")
+    cfg2 = _override_risk(cfg2, dry_run=False)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "#11", "px": "0.5", "sz": "100", "side": "B"})
+    assert _skip_reasons(journal) == ["bad_sizing_mode"]
+
+
+def test_no_skip_reason_is_the_old_opaque_filter_token(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Guard rail: 2,449,814 undifferentiated 'filter' events in 30 days is what
+    hid a 24-day outage. Every skip path must name itself."""
+    cfg2 = _override_sizing(cfg, min_per_trade_usd=10.0, max_per_trade_usd=10.1)
+    cfg2 = _override_risk(cfg2, dry_run=False, allowed_market_types=["outcome"])
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    for i, fill in enumerate([
+        {"coin": "BTC", "px": "100", "sz": "10", "side": "B"},      # market_type
+        {"coin": "#11", "px": "abc", "sz": "10", "side": "B"},      # bad_fill_numbers
+        {"coin": "#11", "px": "0.5", "sz": "10", "side": "Z"},      # bad_fill_fields
+        {"coin": "#11", "px": "0.5", "sz": "10", "side": "B"},      # sub_min
+        {"coin": "#11", "px": "8", "sz": "20", "side": "B"},        # rounding:exceeds_max
+    ]):
+        mt.on_leader_fill("0xleader", {**fill, "tid": i + 1})
+    reasons = _skip_reasons(journal)
+    assert "filter" not in reasons
+    assert reasons == [
+        "market_type", "bad_fill_numbers", "bad_fill_fields", "sub_min", "rounding:exceeds_max",
+    ]
+    assert len(set(reasons)) == len(reasons)  # every path distinguishable

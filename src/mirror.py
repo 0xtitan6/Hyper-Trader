@@ -55,6 +55,22 @@ ORDER_RETRY_BASE_BACKOFF_S = 1.0
 POISON_COOLDOWN_SECONDS = 300.0
 _POISON_ORDER_ERRORS = ("invalid size", "invalid price")
 
+# Sub-minimum rescue margin (incident 2026-07-21 → 2026-08-14).
+# Two failures compound at the venue minimum:
+#   1. Our own floor-rounding: a clip worth exactly `min_per_trade_usd` becomes
+#      $9.9x once the size is floored to szDecimals, and the old code silently
+#      dropped it. Leader 0x6cd520c1 went to weight 1.0 on 2026-07-21 against
+#      fixed_usd=$10 and was muted for 24 days — 10,706 fills filtered vs 79
+#      orders accepted, the survivors only funding-amplified stragglers.
+#   2. HL values the order with ITS OWN reference price, not our limit price,
+#      so an order we compute at exactly $10.00 still rejects when the mark has
+#      drifted a few bps against us (30d evidence: 199 rejects, every single one
+#      at exactly $10.00 intent notional).
+# So the rescue path does not aim at the bare minimum, it aims 1% above it.
+# 1% is comfortably wider than observed mark-vs-fill drift on a mirrored fill
+# and costs ~$0.10 of extra exposure on a $10 clip.
+MIN_NOTIONAL_SAFETY_MARGIN = 0.01
+
 
 class MirrorTrader:
     def __init__(
@@ -116,9 +132,11 @@ class MirrorTrader:
                 sz=fill.get("sz"),
                 side=fill.get("side"),
             )
-            intent = self._build_intent(fill, leader)
+            intent, skip_reason = self._build_intent(fill, leader)
             if intent is None:
-                self.journal.write("intent_skipped", leader=leader, tid=tid, reason="filter")
+                # `skip_reason` is deliberately specific — see _build_intent's
+                # docstring. Never collapse these back into one token.
+                self.journal.write("intent_skipped", leader=leader, tid=tid, reason=skip_reason)
                 return
             with self._submit_lock:
                 # Re-evaluate reduce_only inside the lock — position state may
@@ -186,18 +204,29 @@ class MirrorTrader:
             if isinstance(tid, int) and not submit_attempted:
                 self.positions.state.unmark_tid_seen(tid)
 
-    def _build_intent(self, fill: dict, leader: str = "") -> TradeIntent | None:
+    def _build_intent(self, fill: dict, leader: str = "") -> tuple[TradeIntent | None, str]:
+        """Size a leader fill into our own order.
+
+        Returns `(intent, reason)`. On success `reason` is "ok"; on a skip
+        `intent` is None and `reason` names the SPECIFIC gate that fired.
+
+        The reason string is not cosmetic. Until 2026-08-14 every skip here
+        journalled the single opaque token "filter" — 2,449,814 of them in 30
+        days — so a leader that had been muted by a sizing bug for 24 days was
+        indistinguishable from a leader trading markets we simply don't allow.
+        Any new skip added below MUST get its own reason.
+        """
         coin = fill.get("coin")
         try:
             px = float(fill.get("px", 0))
             sz = float(fill.get("sz", 0))
         except (TypeError, ValueError):
-            return None
+            return None, "bad_fill_numbers"
         side = fill.get("side")
         if not coin or px <= 0 or sz <= 0 or side not in ("B", "A"):
-            return None
+            return None, "bad_fill_fields"
         if not self._is_allowed_market(coin):
-            return None
+            return None, "market_type"
 
         is_buy = side == "B"
         leader_notional = px * sz
@@ -208,7 +237,7 @@ class MirrorTrader:
         elif s.mode == "fixed":
             mirror_notional = float(s.fixed_usd) * weight
         else:
-            return None
+            return None, "bad_sizing_mode"
 
         # Outcomes have a separate (typically higher) min — HL enforces $10
         # USDH min on HIP-4 orders. Perps allow much smaller mirror sizes.
@@ -233,7 +262,7 @@ class MirrorTrader:
                 we_get_paid_apr = -apr_pct if is_buy else apr_pct
                 if we_get_paid_apr <= -s.funding_skip_threshold_apr_pct:
                     # Adverse funding too costly — skip the mirror entirely.
-                    return None
+                    return None, "funding_skip"
                 if we_get_paid_apr >= s.funding_amplify_threshold_apr_pct:
                     # Linear ramp: at threshold → 1.0x, scaled up to amplify_cap
                     # at +200% APR. Capped at amplify_cap.
@@ -242,18 +271,50 @@ class MirrorTrader:
 
         mirror_notional = min(mirror_notional, s.max_per_trade_usd)
         if mirror_notional < effective_min:
-            return None
+            # Genuinely too small to trade. This is the ONLY place a
+            # below-minimum clip is discarded; the rescue below deliberately
+            # never fires here, so we can never size UP a trade the configured
+            # weight/fraction did not already ask for.
+            return None, "sub_min"
 
+        rounded_px = self.market_meta.round_price(px)
         raw_sz = mirror_notional / px
         rounded_sz = self.market_meta.round_size(coin, raw_sz)
-        if rounded_sz <= 0:
-            return None
-        rounded_px = self.market_meta.round_price(px)
         rounded_notional = rounded_sz * rounded_px
-        # Re-check min after rounding — szDecimals=0 outcomes can drop us below
-        # the floor even though the raw notional was above it.
-        if rounded_notional < effective_min:
-            return None
+
+        # Sub-minimum rescue (2026-08-14). We WANTED at least `effective_min`
+        # of notional, but flooring the size to szDecimals took us under it —
+        # or under HL's own mark-price valuation of it, see the constant above.
+        # Rather than discard the leader's signal, round the size up to the
+        # smallest szDecimals step that clears the margin-adjusted minimum.
+        # For the incident case that is exactly one step; coarse-szDecimals
+        # assets (integer-share outcomes) may need the size expressed at their
+        # granularity, which is the same operation.
+        if rounded_sz <= 0 or rounded_notional < effective_min * (1 + MIN_NOTIONAL_SAFETY_MARGIN):
+            target_notional = effective_min * (1 + MIN_NOTIONAL_SAFETY_MARGIN)
+            bumped_sz = self.market_meta.round_size_up(coin, target_notional / rounded_px)
+            bumped_notional = bumped_sz * rounded_px
+            # Rounding up ONLY ever increases exposure, so max_per_trade_usd is
+            # the hard stop: if the smallest viable order is bigger than the
+            # operator's per-trade cap, we skip rather than breach the cap.
+            if bumped_sz <= 0 or bumped_notional > s.max_per_trade_usd:
+                return None, "rounding:exceeds_max"
+            log.info(
+                "[sizing] rounded up to clear min: coin=%s %.8f->%.8f sz "
+                "($%.2f->$%.2f, min=$%.2f)",
+                coin, rounded_sz, bumped_sz, rounded_notional, bumped_notional, effective_min,
+            )
+            self.journal.write(
+                "size_rounded_up",
+                leader=leader,
+                coin=coin,
+                from_sz=rounded_sz,
+                to_sz=bumped_sz,
+                from_notional=rounded_notional,
+                to_notional=bumped_notional,
+                effective_min=effective_min,
+            )
+            rounded_sz, rounded_notional = bumped_sz, bumped_notional
 
         # reduce_only deferred — evaluated inside _submit_lock against fresh state.
         return TradeIntent(
@@ -263,7 +324,7 @@ class MirrorTrader:
             limit_px=rounded_px,
             notional_usd=rounded_notional,
             reduce_only=False,
-        )
+        ), "ok"
 
     def _check_leader_conflict(self, intent: TradeIntent, leader: str) -> str | None:
         """Per-coin weight-priority conflict check.

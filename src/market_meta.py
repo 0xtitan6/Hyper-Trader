@@ -6,7 +6,7 @@ startup and round before submit.
 """
 
 import logging
-from math import floor, log10
+from math import ceil, floor, log10
 from threading import Lock
 from typing import Any
 
@@ -85,6 +85,34 @@ class MarketMeta:
         # Round DOWN to never exceed the leader's notional
         factor = 10**decimals
         return floor(sz * factor) / factor if factor else floor(sz)
+
+    def round_size_up(self, coin: str, sz: float) -> float:
+        """Round size UP to the coin's szDecimals (ceiling).
+
+        Counterpart to `round_size`. Only for the sub-minimum rescue path in
+        `MirrorTrader._build_intent` — floor-rounding a clip that sits exactly
+        on `min_per_trade_usd` produces a notional a few cents BELOW the venue
+        minimum, and the order is then discarded. Incident 2026-07-21 →
+        2026-08-14: leader 0x6cd520c1's weight moved 1.5 → 1.0, making the
+        fixed clip exactly $10.00 against a $10.00 minimum; 10,706 fills were
+        silently dropped over 24 days while only 79 orders got through.
+
+        Callers MUST re-check the resulting notional against
+        `max_per_trade_usd` — rounding up can only ever increase exposure.
+
+        The tiny float fudge (1e-9 of a step) stops binary representation
+        error from adding a whole extra step to a size that is already exact
+        (e.g. 33.3334 stored as 33.33340000000001).
+        """
+        if sz <= 0:
+            return 0.0
+        decimals = self._size_decimals_for(coin)
+        factor = float(10**decimals)
+        return ceil(sz * factor - 1e-9) / factor
+
+    def size_step(self, coin: str) -> float:
+        """Smallest tradable size increment for `coin` (1 szDecimals tick)."""
+        return 1.0 / float(10 ** self._size_decimals_for(coin))
 
     def round_price(self, px: float) -> float:
         """Round price to 5 significant figures (HL rule). Symmetric (no direction bias)."""

@@ -125,3 +125,50 @@ def test_empty_universe_safe(info):
     mm = MarketMeta(info)
     mm.load()  # should not raise
     assert mm._size_decimals_for("ANYTHING") == 4
+
+
+# ---------- round_size_up (sub-minimum rescue, incident 2026-08-14) ----------
+
+
+def test_round_size_up_ceils_to_sz_decimals(info):
+    mm = MarketMeta(info)
+    mm.load()
+    # The incident case: $10 clip / $3000 ETH = 0.00333... → 0.0034, not 0.0033
+    assert mm.round_size_up("ETH", 10 / 3000) == 0.0034
+    assert mm.round_size_up("BTC", 0.000001) == 0.00001  # never floors to zero
+    assert mm.round_size_up("WIF", 0.75) == 1.0  # szDecimals=0 → whole lots
+
+
+def test_round_size_up_leaves_exact_sizes_untouched(info):
+    """Binary representation error must not silently add a whole extra step —
+    that would inflate every rescued order by one lot."""
+    mm = MarketMeta(info)
+    mm.load()
+    assert mm.round_size_up("ETH", 0.0034) == 0.0034
+    assert mm.round_size_up("WIF", 3.0) == 3.0
+    assert mm.round_size_up("ETH", 34 / 10000) == 0.0034  # float-inexact but on-grid
+    assert mm.round_size_up("BTC", 333334 / 100000000) == 0.00334
+
+
+def test_round_size_up_never_below_round_size(info):
+    mm = MarketMeta(info)
+    mm.load()
+    for coin in ("BTC", "ETH", "WIF"):
+        for sz in (0.00007, 0.0033333, 1.5, 19.999):
+            assert mm.round_size_up(coin, sz) >= mm.round_size(coin, sz)
+
+
+def test_round_size_up_zero_or_negative(info):
+    mm = MarketMeta(info)
+    mm.load()
+    assert mm.round_size_up("BTC", 0) == 0.0
+    assert mm.round_size_up("BTC", -1) == 0.0
+
+
+def test_size_step_matches_sz_decimals(info):
+    mm = MarketMeta(info)
+    mm.load()
+    assert mm.size_step("WIF") == 1.0
+    assert mm.size_step("ETH") == 0.0001
+    assert mm.size_step("BTC") == 0.00001
+    assert mm.size_step("#11") == 1.0  # outcomes default to integer shares
