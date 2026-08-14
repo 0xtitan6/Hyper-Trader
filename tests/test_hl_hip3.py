@@ -213,3 +213,55 @@ def test_falls_back_to_manual_mutation_when_set_perp_meta_missing():
     assert info.coin_to_asset["xyz:NVDA"] == 110_000
     assert info.name_to_coin["xyz:NVDA"] == "xyz:NVDA"
     assert info.asset_to_sz_decimals[110_000] == 4
+
+
+# --- MarketMeta enrichment ---------------------------------------------------
+
+
+def test_feeds_market_meta_when_provided():
+    """HIP-3 assets are absent from info.meta(), so the margin guard would price
+    them at MarketMeta's conservative 1x default. We already hold the dex meta
+    here — hand it over rather than paying for another fetch."""
+    from unittest.mock import MagicMock as _MM
+
+    from src.market_meta import MarketMeta
+
+    info = _info_with_dexes(
+        dexes_response=[None, {"name": "xyz"}],
+        meta_by_dex={
+            "xyz": {"universe": [
+                {"name": "xyz:NVDA", "szDecimals": 3, "maxLeverage": 5},
+                {"name": "xyz:AAPL", "szDecimals": 2, "maxLeverage": 3},
+            ]},
+        },
+    )
+    mm = MarketMeta(_MM())
+    register_hip3_dexes(info, mm)
+    assert mm.max_leverage("xyz:NVDA") == 5.0
+    assert mm.max_leverage("xyz:AAPL") == 3.0
+    assert mm._size_decimals_for("xyz:NVDA") == 3
+
+
+def test_market_meta_arg_is_optional_and_registration_unaffected():
+    info = _info_with_dexes(
+        dexes_response=[None, {"name": "xyz"}],
+        meta_by_dex={"xyz": {"universe": [{"name": "xyz:NVDA", "szDecimals": 4}]}},
+    )
+    assert register_hip3_dexes(info) == 1
+    assert info.coin_to_asset["xyz:NVDA"] == 110_000
+
+
+def test_unprefixed_dex_names_also_recorded_prefixed():
+    """Defensive: if HL ever returns bare names, the mirror still looks the coin
+    up as `dex:NAME` (that's what leader fills carry)."""
+    from unittest.mock import MagicMock as _MM
+
+    from src.market_meta import MarketMeta
+
+    info = _info_with_dexes(
+        dexes_response=[None, {"name": "xyz"}],
+        meta_by_dex={"xyz": {"universe": [{"name": "SPCX", "szDecimals": 2, "maxLeverage": 4}]}},
+    )
+    mm = MarketMeta(_MM())
+    register_hip3_dexes(info, mm)
+    assert mm.max_leverage("xyz:SPCX") == 4.0

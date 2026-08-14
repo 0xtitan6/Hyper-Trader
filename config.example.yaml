@@ -22,6 +22,17 @@ risk:
   max_daily_loss_usd: 100
   allowed_market_types: [outcome]   # outcome | perp | spot
   kill_switch_file: ./KILL
+  # Free-margin headroom. max_total_exposure_usd is a NOTIONAL cap; these two
+  # keys are what stop us submitting orders the account can't post margin for
+  # (audit 2026-08-14: 1,599 "Insufficient margin" rejects in 30d vs 457
+  # accepted orders). buffer_frac = share of free collateral we refuse to spend.
+  margin_headroom_buffer_frac: 0.20    # [0.0, 1.0)
+  margin_snapshot_max_age_s: 900       # older than this → check fails OPEN (HL still enforces)
+  # Explicit cross leverage per traded asset, capped at the asset's maxLeverage.
+  # Set on the first open of a coin we're flat in; never re-margins an open
+  # position. Off = whatever default HL picks (was 5-10x, unchosen by us).
+  set_leverage: true
+  target_leverage: 3                   # [1.0, 50.0]
   # Manual positions opened outside the bot (e.g. discretionary outcome bets,
   # hand-traded HIP-3 names). LeaderReconciler skips these so they're never
   # flagged as orphans or auto-closed. Case-insensitive coin-name match.

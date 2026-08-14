@@ -125,3 +125,60 @@ def test_empty_universe_safe(info):
     mm = MarketMeta(info)
     mm.load()  # should not raise
     assert mm._size_decimals_for("ANYTHING") == 4
+
+
+# --- max leverage (drives required-margin math in mirror._risk_check) ---------
+
+
+def test_load_caches_max_leverage(info):
+    info.meta.return_value = {
+        "universe": [
+            {"name": "BTC", "szDecimals": 5, "maxLeverage": 40},
+            {"name": "WIF", "szDecimals": 0, "maxLeverage": 5},
+        ]
+    }
+    mm = MarketMeta(info)
+    mm.load()
+    assert mm.max_leverage("BTC") == 40.0
+    assert mm.max_leverage("WIF") == 5.0
+
+
+def test_max_leverage_defaults_to_one_for_unknown_and_unleveraged(info):
+    """Unknown → assume fully collateralized: over-stating leverage would let
+    through exactly the orders HL rejects for insufficient margin."""
+    mm = MarketMeta(info)
+    mm.load()
+    assert mm.max_leverage("NOTLISTED") == 1.0
+    assert mm.max_leverage("#1420") == 1.0  # HIP-4 outcome
+    assert mm.max_leverage("+1420") == 1.0  # outcome spot leg
+    assert mm.max_leverage("PURR/USDC") == 1.0  # spot pair
+    assert mm.max_leverage("@1") == 1.0
+
+
+def test_max_leverage_ignores_junk_values(info):
+    """A 0 or missing maxLeverage must not become a divide-by-zero downstream."""
+    info.meta.return_value = {
+        "universe": [
+            {"name": "ZERO", "szDecimals": 2, "maxLeverage": 0},
+            {"name": "NONE", "szDecimals": 2},
+            {"name": "JUNK", "szDecimals": 2, "maxLeverage": "abc"},
+        ]
+    }
+    mm = MarketMeta(info)
+    mm.load()
+    assert mm.max_leverage("ZERO") == 1.0
+    assert mm.max_leverage("NONE") == 1.0
+    assert mm.max_leverage("JUNK") == 1.0
+
+
+def test_record_asset_registers_hip3_style_coin(info):
+    """HIP-3 names never appear in info.meta(); register_hip3_dexes feeds them
+    in so they aren't priced at the conservative 1x default."""
+    mm = MarketMeta(info)
+    mm.load()
+    mm.record_asset("xyz:NVDA", sz_decimals=3, max_leverage=5)
+    assert mm.max_leverage("xyz:NVDA") == 5.0
+    assert mm._size_decimals_for("xyz:NVDA") == 3
+    mm.record_asset("xyz:NVDA", sz_decimals=2, max_leverage=10)  # idempotent overwrite
+    assert mm.max_leverage("xyz:NVDA") == 10.0
+    mm.record_asset("", sz_decimals=1, max_leverage=1)  # no-op, no crash

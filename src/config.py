@@ -97,6 +97,24 @@ class RiskConfig:
     # KeyError loop on #1420 (Spurs Finals bet) was only prevented from
     # auto-closing a manual trade by an unrelated missing-asset registration.
     manual_holdings: list[str] = field(default_factory=list)
+    # Free-margin headroom guard (audit 2026-08-14). max_total_exposure_usd is
+    # a NOTIONAL cap and says nothing about whether the account can post the
+    # initial margin; raising it 350 -> 800 on a ~$200 account means margin now
+    # binds first. `margin_headroom_buffer_frac` is the fraction of free
+    # collateral we refuse to spend — 0.20 leaves room for the price drift
+    # between the leader's fill and ours, our IOC slippage, and the mark-price
+    # move that happens between 5-min reconciles. `margin_snapshot_max_age_s`
+    # is how stale the cached margin reading may be before we stop trusting it
+    # and fail OPEN (900s = 3 missed reconcile cycles).
+    margin_headroom_buffer_frac: float = 0.20
+    margin_snapshot_max_age_s: float = 900.0
+    # Explicit leverage. The bot never called update_leverage, so each asset sat
+    # at whatever default HL picked (measured live 2026-08-14: JUP 10x, JTO/AR/
+    # AVNT/XMR 5x — i.e. our margin-per-dollar-of-notional was set by HL, not
+    # by us). With set_leverage on we pin cross leverage to target_leverage,
+    # capped at the asset's maxLeverage, before the first open on a coin.
+    set_leverage: bool = True
+    target_leverage: float = 3.0
 
 
 @dataclass(frozen=True)
@@ -208,6 +226,17 @@ def load_config(path: str = "config.yaml", env: dict[str, str] | None = None) ->
         raise SystemExit(f"risk.allowed_market_types contains invalid entries: {bad}")
     if not risk.allowed_market_types:
         raise SystemExit("risk.allowed_market_types must list at least one market type")
+    if not (0.0 <= risk.margin_headroom_buffer_frac < 1.0):
+        raise SystemExit(
+            "risk.margin_headroom_buffer_frac must be in [0.0, 1.0), got "
+            f"{risk.margin_headroom_buffer_frac}"
+        )
+    if risk.margin_snapshot_max_age_s <= 0:
+        raise SystemExit("risk.margin_snapshot_max_age_s must be > 0")
+    if not (1.0 <= risk.target_leverage <= 50.0):
+        raise SystemExit(
+            f"risk.target_leverage must be in [1.0, 50.0], got {risk.target_leverage}"
+        )
     for coin in risk.manual_holdings:
         if not isinstance(coin, str) or not coin.strip():
             raise SystemExit(

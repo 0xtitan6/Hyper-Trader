@@ -12,7 +12,7 @@ from .errors import OrderError
 from .funding import FundingTracker
 from .journal import Journal
 from .market_meta import MarketMeta
-from .positions import PositionTracker
+from .positions import MarginSnapshot, PositionTracker
 from .protocols import ExchangeProto
 
 log = logging.getLogger(__name__)
@@ -55,6 +55,13 @@ ORDER_RETRY_BASE_BACKOFF_S = 1.0
 POISON_COOLDOWN_SECONDS = 300.0
 _POISON_ORDER_ERRORS = ("invalid size", "invalid price")
 
+# How long before we re-attempt a failed update_leverage on a coin. Same
+# reasoning as the poison cooldown: a leverage call that fails once (asset not
+# registered, HL rejecting the change) will keep failing, and the mirror sees
+# one fill per leader child order, so an uncooled retry turns a single leader
+# burst into a /exchange storm.
+LEVERAGE_RETRY_COOLDOWN_SECONDS = 300.0
+
 
 class MirrorTrader:
     def __init__(
@@ -87,6 +94,11 @@ class MirrorTrader:
         # Coins under a structural-rejection cooldown (bad szDecimals → repeated
         # "invalid size"). coin -> unix ts until which new opens are skipped.
         self._poison_until: dict[str, float] = {}
+        # Coins whose cross leverage we've already pinned this process (see
+        # _ensure_leverage). `_leverage_attempted` holds the last attempt time
+        # per coin so failures back off instead of retrying every fill.
+        self._leverage_set: set[str] = set()
+        self._leverage_attempted: dict[str, float] = {}
         # Per-leader sizing weight, refreshed every discover_leaders cycle.
         # Default 1.0 = original proportional sizing. Updated via
         # update_leader_weights() from main's refresh loop.
@@ -384,7 +396,144 @@ class MirrorTrader:
                 f"exposure_cap (have=${exposure:.0f} + in_flight=${in_flight:.0f} "
                 f"+ new=${intent.notional_usd:.0f} > ${r.max_total_exposure_usd:.0f})"
             )
+
+        # The exposure cap above is NOTIONAL only — it never asked whether the
+        # account can actually post the initial margin. Audit 2026-08-14: 1,599
+        # "Insufficient margin to place order" in-band rejects in 30 days
+        # ($18,952 of dropped notional) against 457 accepted orders, i.e. 3.5
+        # doomed /exchange round trips per real one, each one eating rate-limit
+        # budget the next genuine fill needs. Raising max_total_exposure_usd
+        # 350 -> 800 on a ~$200 account makes margin bind first, always.
+        return self._margin_headroom_check(intent, committed)
+
+    def _effective_leverage(self, coin: str) -> float:
+        """Leverage we actually expect HL to apply to this coin.
+
+        min(configured target, asset max) — this is what _ensure_leverage pins
+        the coin to, so the margin math and the leverage we actually set can't
+        drift apart. Truncated to a whole number because that's all HL accepts,
+        and floored at 1x so it's always a safe divisor.
+        """
+        lev = min(self.cfg.risk.target_leverage, self.market_meta.max_leverage(coin))
+        return float(max(1, int(lev)))
+
+    def _margin_headroom_check(self, intent: TradeIntent, committed: float) -> tuple[bool, str]:
+        """Reject an open whose initial margin exceeds our free collateral.
+
+        Reads the margin snapshot PositionTracker caches on every reconcile
+        (startup + every 5 min) — deliberately no HTTP here: this runs under
+        `_submit_lock` on the hot path, and a leader burst is 5+ fills/second.
+
+        Deliberately NOT applied to:
+          - HIP-4 outcomes / spot: bought outright out of the spot balance, not
+            perp margin. Consistent with the audit — zero of the 1,599 margin
+            rejects were outcome legs.
+          - HIP-3 builder dexes (`xyz:NVDA` etc): each dex is a SEPARATE
+            clearinghouse with its own collateral (measured 2026-08-14: base
+            perp withdrawable $0.0096, xyz dex $0.0015). Gating them on the base
+            account's free margin would be checking the wrong wallet, so HL
+            stays the authority there until we snapshot per-dex state.
+
+        Fails OPEN (no snapshot / stale snapshot): this guard saves wasted round
+        trips, it is not the last line of defence — HL still rejects what it
+        won't accept. A broken reconcile loop must not silently halt trading.
+        """
+        coin = intent.coin
+        is_outcome_or_spot = (
+            coin.startswith("#") or coin.startswith("+") or coin.startswith("@") or "/" in coin
+        )
+        if is_outcome_or_spot or ":" in coin:
+            return True, ""
+
+        snap = self.positions.margin_snapshot()
+        # isinstance (not `is None`) on purpose: PositionTracker is a MagicMock
+        # in much of the suite and in the shadow/backtest harnesses, where any
+        # attribute returns a truthy mock. Same defence as _check_leader_conflict.
+        if not isinstance(snap, MarginSnapshot):
+            return True, ""
+        max_age = self.cfg.risk.margin_snapshot_max_age_s
+        if snap.age_s > max_age:
+            log.warning(
+                "[margin] snapshot stale (%.0fs > %.0fs) — skipping headroom check for %s",
+                snap.age_s, max_age, coin,
+            )
+            return True, ""
+
+        lev = self._effective_leverage(coin)
+        required = intent.notional_usd / lev
+        # Positions opened SINCE the snapshot have already eaten margin that
+        # `free_collateral_usd` still shows as available. Without this term a
+        # single leader burst re-spends the same free collateral on every fill
+        # for up to 5 minutes — the same stale-state race `_in_flight` was
+        # added for on 2026-05-05, one layer up. Charged at this intent's
+        # leverage, which is an approximation when the burst spans coins.
+        growth = max(0.0, committed - snap.exposure_at_snapshot_usd)
+        free = snap.free_collateral_usd - (growth / lev)
+        budget = free * (1.0 - self.cfg.risk.margin_headroom_buffer_frac)
+        if required > budget:
+            return False, (
+                f"margin_headroom (need=${required:.2f} at {lev:g}x > budget=${budget:.2f} "
+                f"| free=${snap.free_collateral_usd:.2f} since_snapshot=${growth:.0f} "
+                f"age={snap.age_s:.0f}s)"
+            )
         return True, ""
+
+    def _ensure_leverage(self, coin: str) -> None:
+        """Pin this coin's cross leverage to risk.target_leverage (capped at the
+        asset max) before our first live open on it.
+
+        The bot has never called update_leverage in its life, so every asset ran
+        at whatever HL defaulted it to — live account 2026-08-14 held JUP at 10x
+        next to JTO/AR/AVNT/XMR at 5x, none of it chosen by us. That also means
+        the margin a given notional consumes was HL's decision, so the headroom
+        check above would be doing arithmetic against a number we don't control.
+
+        Best-effort by design: a failure here NEVER blocks the order. Worst case
+        we're back to the old implicit-default behaviour for that coin, and HL
+        enforces margin either way. Failures back off for
+        LEVERAGE_RETRY_COOLDOWN_SECONDS so a leader burst can't storm /exchange.
+        """
+        if not self.cfg.risk.set_leverage or coin in self._leverage_set:
+            return
+        # Outcomes and spot aren't leveraged instruments — update_leverage on
+        # them is meaningless and errors on the asset lookup.
+        if coin.startswith("#") or coin.startswith("+") or coin.startswith("@") or "/" in coin:
+            return
+        now = time.time()
+        if now - self._leverage_attempted.get(coin, 0.0) < LEVERAGE_RETRY_COOLDOWN_SECONDS:
+            return
+        # Never re-margin a position we already hold. LOWERING leverage on an
+        # open position raises that position's initial-margin requirement on the
+        # spot, and this account runs fully committed (2026-08-14: accountValue
+        # $75.22 vs totalMarginUsed $75.21) — HL would either reject the change
+        # or we'd hand ourselves a worse liquidation price for no new edge.
+        # Flat coins only; leverage then applies to the position we're opening.
+        try:
+            existing_sz, _ = self.positions.state.get_position(coin)
+            if existing_sz:
+                return
+        except Exception:
+            log.exception("[leverage] position lookup failed for %s; skipping", coin)
+            return
+
+        self._leverage_attempted[coin] = now
+        lev = int(self._effective_leverage(coin))
+        try:
+            result = self.exchange.update_leverage(lev, coin, True)  # is_cross=True
+        except Exception as e:
+            log.warning("[leverage] update_leverage(%s, %dx) failed: %s", coin, lev, e)
+            self.journal.write("leverage_set_failed", coin=coin, leverage=lev, error=str(e))
+            return
+        # update_leverage rejects in-band exactly like order() does (HTTP 200
+        # with the reason nested in the body), so reuse the same parser.
+        err = self._order_status_error(result)
+        if err is not None:
+            log.warning("[leverage] %s rejected at %dx: %s", coin, lev, err)
+            self.journal.write("leverage_set_failed", coin=coin, leverage=lev, error=err)
+            return
+        self._leverage_set.add(coin)
+        log.info("[leverage] %s pinned to %dx cross", coin, lev)
+        self.journal.write("leverage_set", coin=coin, leverage=lev)
 
     def _submit_with_retry(
         self, intent: TradeIntent, px: float, leader: str, tid: object
@@ -496,6 +645,8 @@ class MirrorTrader:
             )
             self.journal.write("order_dry_run", leader=leader, tid=tid, intent=asdict(intent))
             return True
+
+        self._ensure_leverage(intent.coin)
 
         slip = self.cfg.sizing.ioc_slippage_bps / 10_000.0
         slipped_px = intent.limit_px * (1 + slip if intent.is_buy else 1 - slip)

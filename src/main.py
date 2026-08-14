@@ -101,7 +101,10 @@ def main(argv: list[str] | None = None) -> int:
     # Register HIP-3 builder-deployed perp dexes (xyz, flx, vntl, etc.) so
     # Exchange.order("xyz:NVDA", ...) resolves. Same patch pattern as
     # outcomes — SDK's Info() defaults to original dex only.
-    n_hip3 = register_hip3_dexes(info)
+    # market_meta is passed so HIP-3 assets contribute their szDecimals and
+    # maxLeverage — without it the margin-headroom guard prices every `xyz:`
+    # name at the conservative 1x default.
+    n_hip3 = register_hip3_dexes(info, market_meta)
     log.info("Registered %d HIP-3 perp assets for trading", n_hip3)
 
     state = State(cfg.ops.state_db)
@@ -282,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
                 last_hip3_refresh = now
                 try:
                     prev_count = len(getattr(info, "coin_to_asset", {}))
-                    register_hip3_dexes(info)
+                    register_hip3_dexes(info, market_meta)
                     register_hip3_dexes(exchange.info)
                     new_count = len(getattr(info, "coin_to_asset", {}))
                     if new_count != prev_count:

@@ -508,3 +508,77 @@ def test_reconcile_skips_already_closed_positions_in_journal(state, journal, tmp
     assert ev["zeroed"] == []
     # The state.db rows still exist (we don't delete on reconcile, just skip)
     assert state.get_position("#closed1") == (0.0, 0.0)
+
+
+# --- margin snapshot (feeds mirror's free-margin headroom guard) --------------
+
+
+def test_reconcile_captures_margin_snapshot(state, journal):
+    """Shape taken from the live account 2026-08-14 (fully margined out)."""
+    info = MagicMock()
+    info.user_state.return_value = {
+        "assetPositions": [{"position": {"coin": "JUP", "szi": "69", "entryPx": "0.5"}}],
+        "marginSummary": {
+            "accountValue": "75.21582",
+            "totalNtlPos": "381.830064",
+            "totalMarginUsed": "75.20626",
+        },
+        "withdrawable": "0.00956",
+    }
+    pt = PositionTracker(info, "0xacc", state, journal)
+    assert pt.margin_snapshot() is None  # nothing cached before the first reconcile
+    pt.reconcile_with_user_state()
+    snap = pt.margin_snapshot()
+    assert snap is not None
+    assert abs(snap.account_value_usd - 75.21582) < 1e-9
+    assert abs(snap.total_margin_used_usd - 75.20626) < 1e-9
+    # `withdrawable` wins — it already nets out open-order + maintenance margin
+    assert abs(snap.free_collateral_usd - 0.00956) < 1e-9
+    # Exposure is captured AFTER the position writes so the mirror can charge
+    # itself for anything opened since.
+    assert abs(snap.exposure_at_snapshot_usd - 34.5) < 1e-9
+    assert snap.age_s < 5.0
+
+
+def test_margin_snapshot_falls_back_to_account_value_minus_margin_used(state, journal):
+    info = MagicMock()
+    info.user_state.return_value = {
+        "assetPositions": [],
+        "marginSummary": {"accountValue": "200", "totalMarginUsed": "50"},
+    }
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    snap = pt.margin_snapshot()
+    assert snap is not None
+    assert abs(snap.free_collateral_usd - 150.0) < 1e-9
+
+
+def test_margin_snapshot_survives_malformed_margin_summary(state, journal):
+    """Garbage margin fields must not break reconcile — positions still land,
+    and the mirror simply keeps failing open."""
+    info = MagicMock()
+    info.user_state.return_value = {
+        "assetPositions": [{"position": {"coin": "#11", "szi": "10", "entryPx": "0.5"}}],
+        "marginSummary": {"accountValue": "n/a", "totalMarginUsed": "?"},
+    }
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    assert state.get_position("#11") == (10.0, 0.5)
+    assert pt.margin_snapshot() is None
+
+
+def test_reconcile_journals_free_collateral(state, journal):
+    info = MagicMock()
+    info.user_state.return_value = {
+        "assetPositions": [],
+        "marginSummary": {"accountValue": "100", "totalMarginUsed": "10"},
+        "withdrawable": "90",
+    }
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    import json
+
+    with open(journal.path) as f:
+        events = [json.loads(line) for line in f if json.loads(line)["event"] == "reconcile"]
+    assert events[0]["free_collateral_usd"] == 90.0
+    assert events[0]["account_value_usd"] == 100.0

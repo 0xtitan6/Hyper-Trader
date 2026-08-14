@@ -25,11 +25,17 @@ from .protocols import InfoProto
 log = logging.getLogger(__name__)
 
 
-def register_hip3_dexes(info: InfoProto) -> int:
+def register_hip3_dexes(info: InfoProto, market_meta: Any = None) -> int:
     """Register every active HIP-3 dex's universe into `info.coin_to_asset`.
 
     Returns the number of assets registered. Idempotent — re-running just
     overwrites the same coin → asset_id mappings.
+
+    When `market_meta` is passed we also copy each asset's szDecimals and
+    maxLeverage into it. HIP-3 names are absent from `info.meta()`, so
+    MarketMeta would otherwise fall back to its conservative 1x default and
+    the margin-headroom guard would reject every HIP-3 open. We're already
+    holding the dex meta here — no extra HTTP call.
 
     Uses the SDK's internal `set_perp_meta(meta, offset)` to mutate the
     instance's maps. Offsets match the SDK's own convention:
@@ -84,6 +90,25 @@ def register_hip3_dexes(info: InfoProto) -> int:
                 sz_decimals = asset_info.get("szDecimals")
                 if sz_decimals is not None:
                     info.asset_to_sz_decimals[asset_id] = sz_decimals  # type: ignore[attr-defined]
+        if market_meta is not None:
+            for asset_info in meta.get("universe", []) or []:
+                if not isinstance(asset_info, dict):
+                    continue
+                coin = asset_info.get("name")
+                if not coin:
+                    continue
+                # HL returns HIP-3 universe names already dex-prefixed
+                # ("xyz:SPCX"), which is what leader fills carry. Record the
+                # bare name too so we still match if that ever changes.
+                market_meta.record_asset(
+                    coin, asset_info.get("szDecimals"), asset_info.get("maxLeverage")
+                )
+                if ":" not in coin:
+                    market_meta.record_asset(
+                        f"{name}:{coin}",
+                        asset_info.get("szDecimals"),
+                        asset_info.get("maxLeverage"),
+                    )
         count = len(meta.get("universe", []) or [])
         registered += count
         log.info("register_hip3_dexes: registered %d assets from dex=%s (offset=%d)", count, name, offset)

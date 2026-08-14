@@ -1,9 +1,11 @@
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from src.mirror import MirrorTrader, TradeIntent
+from src.positions import MarginSnapshot
 
 
 @pytest.fixture
@@ -1081,3 +1083,293 @@ def test_accepted_order_reserves_in_flight(
     mt.on_leader_fill("0xleader", outcome_fill)
     assert len(mt._in_flight) == 1
     positions.state.set_position_originator.assert_called_once()
+
+
+# --- free-margin headroom (audit 2026-08-14: 1,599 "Insufficient margin"
+# rejects in 30d vs 457 accepted orders) --------------------------------------
+
+
+def _snap(free: float = 1000.0, exposure: float = 0.0, age_s: float = 0.0) -> MarginSnapshot:
+    return MarginSnapshot(
+        account_value_usd=free,
+        total_margin_used_usd=0.0,
+        free_collateral_usd=free,
+        exposure_at_snapshot_usd=exposure,
+        ts=time.time() - age_s,
+    )
+
+
+@pytest.fixture
+def perp_fill() -> dict:
+    # 0.01 * 65000 = $650 leader notional * 0.10 = $65 mirrored
+    return {"tid": 2001, "coin": "BTC", "px": "65000", "sz": "0.01", "side": "B"}
+
+
+def _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta, **risk):
+    cfg2 = _override_risk(
+        cfg, dry_run=False, allowed_market_types=["outcome", "perp"], **risk
+    )
+    return MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+
+
+def test_margin_headroom_blocks_when_free_collateral_short(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    """$65 notional at 3x needs $21.67; $20 free (minus buffer) can't cover it."""
+    positions.margin_snapshot.return_value = _snap(free=20.0)
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    exchange.order.assert_not_called()
+
+
+def test_margin_headroom_allows_when_free_collateral_ample(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    positions.margin_snapshot.return_value = _snap(free=1000.0)
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    exchange.order.assert_called_once()
+
+
+def test_margin_headroom_journals_distinct_reason(
+    cfg, positions, alerter, exchange, perp_fill, tmp_path, market_meta
+):
+    """Reason must be greppable — not the opaque 'filter' bucket."""
+    import json as _json
+
+    from src.journal import Journal as J
+
+    j = J(str(tmp_path / "j.jsonl"))
+    positions.margin_snapshot.return_value = _snap(free=1.0)
+    mt = _perp_mirror(cfg, exchange, positions, j, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    entries = [_json.loads(ln) for ln in (tmp_path / "j.jsonl").read_text().splitlines()]
+    checks = [e for e in entries if e["event"] == "risk_check"]
+    assert len(checks) == 1
+    assert checks[0]["ok"] is False
+    assert checks[0]["reason"].startswith("margin_headroom (")
+    assert "filter" not in checks[0]["reason"]
+
+
+def test_margin_headroom_respects_buffer_fraction(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    """$25 free covers the $21.67 requirement outright, but not with a 20% buffer."""
+    positions.margin_snapshot.return_value = _snap(free=25.0)
+    blocked = _perp_mirror(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        margin_headroom_buffer_frac=0.20,
+    )
+    blocked.on_leader_fill("0xleader", perp_fill)
+    exchange.order.assert_not_called()
+
+    allowed = _perp_mirror(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        margin_headroom_buffer_frac=0.0,
+    )
+    allowed.on_leader_fill("0xleader", {**perp_fill, "tid": 2002})
+    exchange.order.assert_called_once()
+
+
+def test_margin_headroom_uses_asset_max_leverage_when_below_target(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Same $50 notional, same $16 budget: needs $25 at the asset's 2x cap,
+    only $10 at the 5x target BTC allows."""
+    market_meta.record_asset("LOWLEV", sz_decimals=2, max_leverage=2)
+    positions.margin_snapshot.return_value = _snap(free=20.0)
+    mt = _perp_mirror(
+        cfg, exchange, positions, journal, alerter, market_meta, target_leverage=5.0
+    )
+    assert mt._effective_leverage("LOWLEV") == 2.0
+    assert mt._effective_leverage("BTC") == 5.0  # capped by target, not the 50x max
+
+    mt.on_leader_fill(
+        "0xleader", {"tid": 2003, "coin": "LOWLEV", "px": "100", "sz": "5", "side": "B"}
+    )
+    exchange.order.assert_not_called()
+
+    mt.on_leader_fill(
+        "0xleader", {"tid": 2009, "coin": "BTC", "px": "50000", "sz": "0.01", "side": "B"}
+    )
+    exchange.order.assert_called_once()
+
+
+def test_margin_headroom_charges_positions_opened_since_snapshot(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    """A leader burst must not re-spend the same free collateral every fill.
+
+    The snapshot only refreshes every 5 min (reconcile cadence), so margin
+    consumed by fills we just sent has to be subtracted locally — same class of
+    stale-state race that `_in_flight` fixed for the notional cap on 2026-05-05.
+    """
+    positions.margin_snapshot.return_value = _snap(free=40.0)
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    mt.on_leader_fill("0xleader", {**perp_fill, "tid": 2004})
+    # First fill fits ($21.67 < $32 budget); the second sees $65 of in-flight
+    # notional (= $21.67 of margin) already spent and no longer does.
+    exchange.order.assert_called_once()
+
+
+def test_margin_headroom_fails_open_without_snapshot(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    """No reconcile yet → don't halt trading; HL still enforces margin."""
+    positions.margin_snapshot.return_value = None
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    exchange.order.assert_called_once()
+
+
+def test_margin_headroom_fails_open_on_stale_snapshot(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    positions.margin_snapshot.return_value = _snap(free=0.01, age_s=5000.0)
+    mt = _perp_mirror(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        margin_snapshot_max_age_s=900.0,
+    )
+    mt.on_leader_fill("0xleader", perp_fill)
+    exchange.order.assert_called_once()
+
+
+def test_margin_headroom_skipped_for_outcomes(
+    cfg, positions, journal, alerter, exchange, outcome_fill, market_meta
+):
+    """Outcomes settle out of the spot USDH balance, not perp margin — and zero
+    of the 1,599 audited margin rejects were outcome legs."""
+    positions.margin_snapshot.return_value = _snap(free=0.0)
+    cfg2 = _override_risk(cfg, dry_run=False)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", outcome_fill)
+    exchange.order.assert_called_once()
+
+
+def test_margin_headroom_skipped_for_hip3_dex_coins(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """HIP-3 dexes hold separate collateral — the base account's free margin is
+    the wrong wallet to gate them on."""
+    positions.margin_snapshot.return_value = _snap(free=0.0)
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill(
+        "0xleader", {"tid": 2005, "coin": "xyz:NVDA", "px": "100", "sz": "5", "side": "B"}
+    )
+    exchange.order.assert_called_once()
+
+
+def test_margin_headroom_does_not_block_reduce_only_exits(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    """Exits must always be allowed — they release margin, never consume it."""
+    positions.margin_snapshot.return_value = _snap(free=0.0)
+    positions.state.get_position.return_value = (-1.0, 65000.0)  # short → buy reduces
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    exchange.order.assert_called_once()
+    assert exchange.order.call_args.kwargs["reduce_only"] is True
+
+
+# --- explicit leverage (the bot never called update_leverage; live account
+# 2026-08-14 sat at HL defaults of 5-10x) --------------------------------------
+
+
+def test_leverage_pinned_on_first_open_and_cached(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    mt = _perp_mirror(
+        cfg, exchange, positions, journal, alerter, market_meta, target_leverage=3.0
+    )
+    mt.on_leader_fill("0xleader", perp_fill)
+    exchange.update_leverage.assert_called_once_with(3, "BTC", True)
+    mt.on_leader_fill("0xleader", {**perp_fill, "tid": 2006})
+    exchange.update_leverage.assert_called_once()  # cached — not re-sent per fill
+    assert "BTC" in mt._leverage_set
+
+
+def test_leverage_capped_at_asset_max(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    market_meta.record_asset("LOWLEV", sz_decimals=2, max_leverage=2)
+    mt = _perp_mirror(
+        cfg, exchange, positions, journal, alerter, market_meta, target_leverage=20.0
+    )
+    mt.on_leader_fill(
+        "0xleader", {"tid": 2007, "coin": "LOWLEV", "px": "100", "sz": "5", "side": "B"}
+    )
+    exchange.update_leverage.assert_called_once_with(2, "LOWLEV", True)
+
+
+def test_leverage_not_touched_when_position_already_open(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    """Lowering leverage on a live position raises ITS margin requirement — on a
+    fully-margined account that costs liquidation buffer for no new edge."""
+    positions.state.get_position.return_value = (0.5, 60000.0)  # already long BTC
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    exchange.order.assert_called_once()
+    exchange.update_leverage.assert_not_called()
+
+
+def test_leverage_failure_never_blocks_the_order(
+    cfg, positions, journal, alerter, perp_fill, market_meta
+):
+    exchange = MagicMock()
+    exchange.order.return_value = {"status": "ok"}
+    exchange.update_leverage.side_effect = RuntimeError("hl down")
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    exchange.order.assert_called_once()
+    assert "BTC" not in mt._leverage_set
+
+
+def test_leverage_failure_backs_off_instead_of_retrying_every_fill(
+    cfg, positions, journal, alerter, perp_fill, market_meta
+):
+    exchange = MagicMock()
+    exchange.order.return_value = {"status": "ok"}
+    exchange.update_leverage.side_effect = RuntimeError("hl down")
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    mt.on_leader_fill("0xleader", {**perp_fill, "tid": 2008})
+    assert exchange.update_leverage.call_count == 1  # cooldown, no /exchange storm
+
+
+def test_leverage_in_band_rejection_is_not_cached_as_success(
+    cfg, positions, journal, alerter, perp_fill, market_meta
+):
+    """update_leverage rejects HTTP-200-with-error like order() does."""
+    exchange = MagicMock()
+    exchange.order.return_value = {"status": "ok"}
+    exchange.update_leverage.return_value = {"status": "err", "response": "Insufficient margin"}
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    assert "BTC" not in mt._leverage_set
+    exchange.order.assert_called_once()
+
+
+def test_leverage_skipped_for_outcomes_and_when_disabled(
+    cfg, positions, journal, alerter, exchange, outcome_fill, perp_fill, market_meta
+):
+    cfg2 = _override_risk(cfg, dry_run=False)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", outcome_fill)
+    exchange.update_leverage.assert_not_called()  # outcomes aren't leveraged
+
+    off = _perp_mirror(
+        cfg, exchange, positions, journal, alerter, market_meta, set_leverage=False
+    )
+    off.on_leader_fill("0xleader", perp_fill)
+    exchange.update_leverage.assert_not_called()
+
+
+def test_leverage_not_set_in_dry_run(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    cfg2 = _override_risk(cfg, dry_run=True, allowed_market_types=["outcome", "perp"])
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    exchange.update_leverage.assert_not_called()

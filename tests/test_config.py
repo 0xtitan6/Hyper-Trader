@@ -337,3 +337,48 @@ def test_config_is_immutable(tmp_path, good_env):
     cfg = load_config(_write_yaml(tmp_path, _base_yaml()), env=good_env)
     with pytest.raises((AttributeError, dataclasses.FrozenInstanceError)):
         cfg.network.hyperliquid_env = "mainnet"  # type: ignore[misc]
+
+
+# --- margin headroom + leverage keys -----------------------------------------
+
+
+def test_margin_and_leverage_defaults(tmp_path, good_env):
+    """Live config.yaml predates these keys, so the defaults are what actually
+    ships: a 20% collateral buffer and 3x cross leverage."""
+    cfg = load_config(_write_yaml(tmp_path, _base_yaml()), env=good_env)
+    assert cfg.risk.margin_headroom_buffer_frac == 0.20
+    assert cfg.risk.margin_snapshot_max_age_s == 900.0
+    assert cfg.risk.set_leverage is True
+    assert cfg.risk.target_leverage == 3.0
+
+
+def test_margin_and_leverage_overrides(tmp_path, good_env):
+    data = _base_yaml()
+    data["risk"].update(
+        margin_headroom_buffer_frac=0.5,
+        margin_snapshot_max_age_s=300,
+        set_leverage=False,
+        target_leverage=10,
+    )
+    cfg = load_config(_write_yaml(tmp_path, data), env=good_env)
+    assert cfg.risk.margin_headroom_buffer_frac == 0.5
+    assert cfg.risk.margin_snapshot_max_age_s == 300
+    assert cfg.risk.set_leverage is False
+    assert cfg.risk.target_leverage == 10
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"margin_headroom_buffer_frac": 1.0},   # would zero out every budget
+        {"margin_headroom_buffer_frac": -0.1},
+        {"margin_snapshot_max_age_s": 0},
+        {"target_leverage": 0.5},               # sub-1x isn't a thing on HL
+        {"target_leverage": 100},
+    ],
+)
+def test_rejects_out_of_range_margin_settings(tmp_path, good_env, changes):
+    data = _base_yaml()
+    data["risk"].update(changes)
+    with pytest.raises(SystemExit):
+        load_config(_write_yaml(tmp_path, data), env=good_env)

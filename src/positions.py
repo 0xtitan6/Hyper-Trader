@@ -1,5 +1,6 @@
 import logging
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from threading import RLock
 from typing import Any
@@ -15,6 +16,33 @@ log = logging.getLogger(__name__)
 
 def today_utc() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%d")
+
+
+@dataclass(frozen=True)
+class MarginSnapshot:
+    """Point-in-time view of HL's own margin accounting for our account.
+
+    Captured on every `reconcile_with_user_state` (startup + the 5-min loop in
+    main) so the order hot path can check free-margin headroom WITHOUT a
+    blocking HTTP call per leader fill. A single leader burst is 5+ child fills
+    in a second and HL rate-limits /info and /exchange per account — adding a
+    synchronous fetch there would trade margin rejects for 429s.
+
+    `exposure_at_snapshot_usd` is our own cost-basis exposure at capture time.
+    The mirror uses it to charge itself for positions opened SINCE the snapshot
+    (up to 5 min of drift) instead of re-spending the same free collateral on
+    every fill in a burst.
+    """
+
+    account_value_usd: float
+    total_margin_used_usd: float
+    free_collateral_usd: float
+    exposure_at_snapshot_usd: float
+    ts: float
+
+    @property
+    def age_s(self) -> float:
+        return max(0.0, time.time() - self.ts)
 
 
 class PositionTracker:
@@ -42,6 +70,10 @@ class PositionTracker:
         self.alerter: Alerter = alerter or NullAlerter()
         self._lock = RLock()
         self._subscribed = False
+        # Last margin reading from HL, refreshed by reconcile_with_user_state.
+        # None until the first successful reconcile — consumers must fail OPEN
+        # on None (see mirror._margin_headroom_check).
+        self._margin: MarginSnapshot | None = None
 
     def start(self) -> None:
         with self._lock:
@@ -68,6 +100,46 @@ class PositionTracker:
         for _coin, (sz, avg_px) in self.state.get_positions().items():
             total += abs(sz) * avg_px
         return total
+
+    def margin_snapshot(self) -> MarginSnapshot | None:
+        """Latest cached margin reading, or None if we've never reconciled."""
+        with self._lock:
+            return self._margin
+
+    def _capture_margin_snapshot(self, us: dict) -> None:
+        """Parse `marginSummary` / `withdrawable` out of a user_state payload.
+
+        `withdrawable` is HL's own "how much could leave this account" figure —
+        it already nets out margin held by open orders and the maintenance
+        requirement, so it's the tightest honest answer to "can I open more".
+        We fall back to accountValue - totalMarginUsed if it's absent.
+
+        Note this only covers the BASE perp clearinghouse. HIP-3 builder dexes
+        keep separate collateral (measured 2026-08-14: base withdrawable
+        $0.0096 vs xyz dex $0.0015), which is why the mirror doesn't gate HIP-3
+        coins on this number.
+        """
+        try:
+            ms = us.get("marginSummary") or {}
+            account_value = float(ms.get("accountValue", 0) or 0)
+            margin_used = float(ms.get("totalMarginUsed", 0) or 0)
+            raw_withdrawable = us.get("withdrawable")
+            free = (
+                float(raw_withdrawable)
+                if raw_withdrawable is not None
+                else account_value - margin_used
+            )
+        except (TypeError, ValueError):
+            log.warning("reconcile: malformed marginSummary %s", us.get("marginSummary"))
+            return
+        with self._lock:
+            self._margin = MarginSnapshot(
+                account_value_usd=account_value,
+                total_margin_used_usd=margin_used,
+                free_collateral_usd=free,
+                exposure_at_snapshot_usd=self.total_exposure_usd(),
+                ts=time.time(),
+            )
 
     def reconcile_with_user_state(self) -> dict[str, tuple[float, float]]:
         """Overwrite local position state with HL's authoritative state.
@@ -166,11 +238,17 @@ class PositionTracker:
                 cur_sz, _cur_avg = active_local[coin]
                 log.info("reconcile: zeroing %s (was sz=%s)", coin, cur_sz)
                 self.state.update_position(coin, 0.0, 0.0)
+        # After the position writes, so exposure_at_snapshot_usd lines up with
+        # the state the mirror will read.
+        self._capture_margin_snapshot(us)
+        snap = self.margin_snapshot()
         self.journal.write(
             "reconcile",
             upstream_count=len(upstream),
             local_count=len(active_local),
             zeroed=sorted(active_local.keys() - upstream.keys()),
+            account_value_usd=snap.account_value_usd if snap else None,
+            free_collateral_usd=snap.free_collateral_usd if snap else None,
         )
         return self.state.get_positions()
 
