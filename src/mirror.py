@@ -71,6 +71,18 @@ _POISON_ORDER_ERRORS = ("invalid size", "invalid price")
 # and costs ~$0.10 of extra exposure on a $10 clip.
 MIN_NOTIONAL_SAFETY_MARGIN = 0.01
 
+# Hard ceiling on how far the rescue may bump a clip (review addition,
+# 2026-08-14). Rounding up only ever INCREASES exposure, and on coarse-
+# szDecimals assets one step is not small: a $12 clip on an $18/share
+# integer-share outcome becomes $18 (1.5x). With max_per_trade_usd as the
+# only backstop the theoretical worst case is max_per_trade_usd /
+# min_per_trade_usd — at the live $120/$10 that is a 12x unintended
+# position, which is a position-sizing decision, not a rounding fix.
+# We would rather skip the fill than take a materially larger bet than the
+# configured weight asked for. A skipped mirror costs one leader signal; an
+# oversized one costs real money on a $200 book.
+MAX_BUMP_RATIO = 1.5
+
 
 class MirrorTrader:
     def __init__(
@@ -299,6 +311,12 @@ class MirrorTrader:
             # operator's per-trade cap, we skip rather than breach the cap.
             if bumped_sz <= 0 or bumped_notional > s.max_per_trade_usd:
                 return None, "rounding:exceeds_max"
+            # ...but max_per_trade_usd alone is far too loose a leash on a
+            # coarse-granularity asset (see MAX_BUMP_RATIO). Also refuse to
+            # bump more than MAX_BUMP_RATIO x what the configured weight
+            # actually asked for.
+            if bumped_notional > mirror_notional * MAX_BUMP_RATIO:
+                return None, "rounding:exceeds_bump_ratio"
             log.info(
                 "[sizing] rounded up to clear min: coin=%s %.8f->%.8f sz "
                 "($%.2f->$%.2f, min=$%.2f)",

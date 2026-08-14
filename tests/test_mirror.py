@@ -1262,6 +1262,22 @@ def test_unrepresentably_small_clip_skips_when_one_lot_breaches_max(
     assert _skip_reasons(journal) == ["rounding:exceeds_max"]
 
 
+def test_rescue_skips_when_bump_exceeds_ratio_even_under_max_per_trade(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Review addition 2026-08-14: max_per_trade_usd is too loose a leash on
+    coarse-szDecimals assets. A $6 clip whose smallest lot costs $18 is a 3x
+    unintended position — well under a $100 per-trade cap, but not a rounding
+    fix any more. MAX_BUMP_RATIO must reject it."""
+    cfg2 = _override_sizing(cfg, min_per_trade_usd=5.0, max_per_trade_usd=100.0)
+    cfg2 = _override_risk(cfg2, dry_run=False)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    # $60 leader notional x 0.10 = $6 clip; one share costs $18 → 3.0x bump.
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "#11", "px": "18", "sz": "3.3334", "side": "B"})
+    exchange.order.assert_not_called()
+    assert _skip_reasons(journal) == ["rounding:exceeds_bump_ratio"]
+
+
 def test_genuinely_sub_min_clip_is_never_sized_up(
     cfg, positions, journal, alerter, exchange, market_meta
 ):
