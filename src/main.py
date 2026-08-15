@@ -16,7 +16,7 @@ from .connection import ConnectionHealth
 from .errors import PreflightError
 from .follower import FillFollower
 from .funding_history import FundingHistory
-from .leader_reconcile import LeaderReconciler
+from .leader_reconcile import STATUS_DROPPED, LeaderReconciler
 from .pref_client import PrefClient
 from .thesis import ThesisCache
 from .thesis_generator import ThesisGenerator
@@ -209,6 +209,33 @@ def main(argv: list[str] | None = None) -> int:
         manual_holdings=cfg.risk.manual_holdings,
     )
 
+    def check_dropped_leaders(when: str) -> None:
+        """Flag mirrors whose originating leader is no longer followed.
+
+        Fed the CURRENT leader set, NOT `follower.addresses` — the follower
+        never unsubscribes, so its address list still contains every leader we
+        have ever followed and can never reveal a drop. Detect-only: it
+        journals + alerts once per coin and never closes anything.
+
+        Until 2026-08-15 nothing watched for this. Four mirrors from two
+        leaders dropped in July sat untouched for weeks holding 100% of base
+        margin ($67.64 initial / $344 gross), starving every signal from our
+        current leaders until an operator closed them by hand.
+        """
+        try:
+            flagged = leader_reconciler.check_dropped_leaders(
+                [t.address for t in leaders]
+            )
+            n = sum(1 for s in flagged.values() if s == STATUS_DROPPED)
+            if n:
+                log.warning("Dropped-leader check (%s): %d orphaned position(s)", when, n)
+        except Exception:
+            log.exception("Dropped-leader check failed (%s)", when)
+
+    # Startup pass: catch anything stranded while we were down or by a config
+    # edit between runs.
+    check_dropped_leaders("startup")
+
     funding_history = FundingHistory(state)
     # Cold-start backfill of funding history; subsequent polls are incremental.
     try:
@@ -365,6 +392,9 @@ def main(argv: list[str] | None = None) -> int:
                 if cfg.sizing.use_funding_aware_sizing:
                     funding.refresh()
                 leaders = refreshed
+                # A refresh is the ONLY moment a leader can leave the set, so
+                # it is the moment to look for mirrors they left behind.
+                check_dropped_leaders("refresh")
             except Exception:
                 log.exception("Leader refresh failed")
     finally:
