@@ -56,6 +56,17 @@ def _is_spot(coin: str) -> bool:
     return "/" in coin or coin.startswith("@")
 
 
+def dex_of(coin: str) -> str:
+    """Which clearinghouse settles this coin: the builder-dex prefix, or "".
+
+    `xyz:SP500` -> "xyz"; `BTC`, `#12`, `@107`, `PURR/USDC` -> "" (base).
+    Each HIP-3 builder dex holds its own collateral, so risk limits that are
+    about collateral must be bucketed by this, not summed across everything.
+    """
+    head, sep, _ = coin.partition(":")
+    return head if sep else ""
+
+
 def _is_dex_prefixed(coin: str) -> bool:
     """HIP-3 builder-dex coins are `<dex>:<symbol>` — e.g. `xyz:MU`, `flx:BTC`.
 

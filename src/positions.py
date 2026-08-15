@@ -8,6 +8,7 @@ from typing import Any
 from .alerts import Alerter, NullAlerter
 from .connection import ConnectionHealth
 from .journal import Journal
+from .market_meta import dex_of
 from .protocols import InfoProto
 from .state import State
 
@@ -99,6 +100,26 @@ class PositionTracker:
         total = 0.0
         for _coin, (sz, avg_px) in self.state.get_positions().items():
             total += abs(sz) * avg_px
+        return total
+
+    def exposure_usd_for_dex(self, dex: str) -> float:
+        """Gross notional held on ONE clearinghouse.
+
+        Hyperliquid settles each HIP-3 builder dex against its own collateral,
+        so summing them into a single number and gating on that charges an
+        `xyz:` order for risk carried on the base account. Measured 2026-08-15
+        while doing exactly that: base ran 2.4x maintenance coverage and xyz
+        ran 14.6x, yet a single shared cap blocked 40 of 40 opens — 39 of them
+        on xyz:SP500, which is 64% of our best leader's flow.
+
+        `dex` is the prefix before ':' (`xyz`, `flx`, ...), or "" for the base
+        perp dex, which is also where outcomes and spot live: they draw on the
+        base account's collateral, so they belong in the base bucket.
+        """
+        total = 0.0
+        for coin, (sz, avg_px) in self.state.get_positions().items():
+            if dex_of(coin) == dex:
+                total += abs(sz) * avg_px
         return total
 
     def margin_snapshot(self) -> MarginSnapshot | None:

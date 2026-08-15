@@ -132,6 +132,17 @@ risk:
   # 2.29x, and scales portfolio maxDD to ~12% of account. This does NOT reach
   # $1,000 — projects ~$260 by Aug 31. Revert values in /tmp/config.yaml.bak-2240.
   max_total_exposure_usd: 800
+  # 2026-08-15: per-BUILDER-DEX gross cap, separate from the base cap above.
+  # Each HIP-3 dex settles against its own collateral, so one shared number was
+  # charging xyz: orders for base-account risk: 40 of 40 blocked opens in a 4h
+  # window were xyz (39 of them xyz:SP500 = 64% of our best leader's flow),
+  # while base ran 2.4x maintenance coverage and xyz ran 14.6x. We were
+  # throttling the safest, best-performing book we have.
+  # Sizing: xyz held $308 gross on $61.48 equity with $4.20 maintenance
+  # (~1.4% maint rate). At $500 gross, maintenance is ~$7 and coverage is still
+  # ~8.8x, versus 2.4x on base. Headroom to grow the surface that works,
+  # without letting it run unbounded.
+  max_dex_exposure_usd: 500
   # Raised 30→80 in step with size: at 4x book the old $30 breaker would trip
   # on routine variance and halt trading. $80 = ~40% of account in one day.
   max_daily_loss_usd: 80

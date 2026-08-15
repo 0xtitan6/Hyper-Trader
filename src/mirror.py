@@ -11,7 +11,7 @@ from .config import Config
 from .errors import OrderError, UnknownPrecisionError
 from .funding import FundingTracker
 from .journal import Journal
-from .market_meta import MarketMeta
+from .market_meta import MarketMeta, dex_of
 from .positions import MarginSnapshot, PositionTracker
 from .protocols import ExchangeProto
 
@@ -511,17 +511,38 @@ class MirrorTrader:
         if self._poison_until.get(intent.coin, 0.0) > time.time():
             return False, f"poison_cooldown ({intent.coin})"
 
-        exposure = self.positions.total_exposure_usd()
         in_flight = self._in_flight_notional()
-        # Total committed exposure = confirmed positions + pending submissions
-        # whose own-fill hasn't propagated through PositionTracker yet. Without
-        # `in_flight`, rapid-fire leader mirrors race the WS feedback loop and
-        # bypass the cap entirely (real bug observed 2026-05-05).
-        committed = exposure + in_flight
-        if committed + intent.notional_usd > r.max_total_exposure_usd:
+        # `committed` stays ACCOUNT-WIDE: it feeds the margin check below, and
+        # in_flight is not attributable per-dex (we only record notionals).
+        # Confirmed positions + pending submissions whose own-fill hasn't
+        # propagated through PositionTracker yet — without in_flight, rapid-fire
+        # leader mirrors race the WS feedback loop and bypass the cap entirely
+        # (real bug observed 2026-05-05).
+        committed = self.positions.total_exposure_usd() + in_flight
+
+        # Cap PER CLEARINGHOUSE, not across all of them (2026-08-15).
+        # Every HIP-3 builder dex settles against its OWN collateral, so a
+        # shared cap charges an `xyz:` order for risk carried on the base
+        # account. Measured while it was doing that: base at 2.4x maintenance
+        # coverage, xyz at 14.6x, and yet 40 of 40 blocked opens were xyz —
+        # 39 on xyz:SP500, which is 64% of our best leader's flow. We were
+        # throttling the safest, best-performing surface we have.
+        dex = dex_of(intent.coin)
+        # Unset (0.0) means "no separate budget decided yet" — fall back to the
+        # base cap rather than 0, which would silently disable ALL builder-dex
+        # trading. A default that turns off a whole surface is exactly the kind
+        # of quiet suppression this change exists to remove.
+        dex_cap = (r.max_dex_exposure_usd or r.max_total_exposure_usd) if dex \
+            else r.max_total_exposure_usd
+        dex_exposure = self.positions.exposure_usd_for_dex(dex)
+        # in_flight is charged to whichever dex is asking. It is short-lived
+        # (30s TTL) and erring high is the safe direction for a risk cap.
+        if dex_exposure + in_flight + intent.notional_usd > dex_cap:
+            label = f"dex={dex}" if dex else "base"
             return False, (
-                f"exposure_cap (have=${exposure:.0f} + in_flight=${in_flight:.0f} "
-                f"+ new=${intent.notional_usd:.0f} > ${r.max_total_exposure_usd:.0f})"
+                f"exposure_cap ({label} have=${dex_exposure:.0f} "
+                f"+ in_flight=${in_flight:.0f} "
+                f"+ new=${intent.notional_usd:.0f} > ${dex_cap:.0f})"
             )
 
         # The exposure cap above is NOTIONAL only — it never asked whether the

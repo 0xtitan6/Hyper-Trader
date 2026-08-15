@@ -32,6 +32,15 @@ from src.hl_hip3 import register_hip3_dexes
 from src.market_meta import MarketMeta
 
 
+def _dex_names(info: Info) -> list[str]:
+    """Names of HIP-3 builder dexes. Empty list on any failure (never fatal)."""
+    try:
+        dexes = info.post("/info", {"type": "perpDexs"})
+    except Exception:  # noqa: BLE001
+        return []
+    return [d["name"] for d in (dexes or []) if isinstance(d, dict) and d.get("name")]
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--coin", required=True, help="perp coin to flatten, e.g. AR")
@@ -58,16 +67,37 @@ def main(argv: list[str] | None = None) -> int:
     register_hip3_dexes(info, market_meta=market_meta)
 
     # current position
-    us = info.user_state(cfg.account_address)
+    #
+    # HIP-3 COVERAGE (added 2026-08-15): `info.user_state()` returns ONLY the
+    # base perp clearinghouse. Builder-deployed dexes (`xyz:*`) are separate
+    # sub-accounts, so an `xyz:*` position was invisible here and derisk exited
+    # "nothing to do" — a SILENT NO-OP on the one lever that prevents a
+    # liquidation. Found 2026-08-15 with xyz:AMAT at 5.7% from liq. Same fix
+    # as scripts/risk_snapshot.py: enumerate perpDexs and search each one.
     sz = 0.0
-    entry = None
-    for ap_ in us.get("assetPositions", []):
-        p = ap_.get("position", {})
-        if p.get("coin") == args.coin:
-            sz = float(p.get("szi", 0) or 0)
-            entry = p.get("entryPx")
-            liq = p.get("liquidationPx")
-            unreal = p.get("unrealizedPnl")
+    entry = liq = unreal = None
+    found_dex = None  # None => base dex
+    for dex in [None, *_dex_names(info)]:
+        try:
+            if dex is None:
+                st = info.user_state(cfg.account_address)
+            else:
+                st = info.post(
+                    "/info",
+                    {"type": "clearinghouseState", "user": cfg.account_address, "dex": dex},
+                )
+        except Exception:  # noqa: BLE001
+            continue  # a dead dex must never block flattening on the others
+        for ap_ in (st or {}).get("assetPositions", []):
+            p = ap_.get("position", {})
+            if p.get("coin") == args.coin:
+                sz = float(p.get("szi", 0) or 0)
+                entry = p.get("entryPx")
+                liq = p.get("liquidationPx")
+                unreal = p.get("unrealizedPnl")
+                found_dex = dex
+                break
+        if sz != 0.0:
             break
     if sz == 0.0:
         print(f"derisk: no open position in {args.coin} — nothing to do")
@@ -87,9 +117,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"derisk: rounded close size is 0 for {args.coin}")
         return 0
 
-    mid = float(info.all_mids().get(args.coin, 0) or 0)
+    # `all_mids()` covers the base dex only — it has no `xyz:*` key, so even
+    # with the position found above we'd have exited "bad mid". Dex-scoped
+    # allMids keys by the FULL name ("xyz:AMAT"), matching args.coin.
+    if found_dex is None:
+        mids = info.all_mids()
+    else:
+        mids = info.post("/info", {"type": "allMids", "dex": found_dex}) or {}
+    mid = float(mids.get(args.coin, 0) or 0)
     if mid <= 0:
-        print(f"derisk: bad mid for {args.coin}", file=sys.stderr)
+        print(f"derisk: bad mid for {args.coin} (dex={found_dex or 'base'})", file=sys.stderr)
         return 3
     is_buy = sz < 0  # close a short by buying
     bps = args.slippage_bps / 10_000
@@ -108,6 +145,14 @@ def main(argv: list[str] | None = None) -> int:
 
     wallet = Account.from_key(cfg.private_key)
     exchange = Exchange(wallet, cfg.hyperliquid_api_url, account_address=cfg.account_address)
+    # `Exchange` builds its OWN internal `Info`, which — like ours above before
+    # registration — knows only the base perp dex. Registering on the module-level
+    # `info` does NOT propagate here, so `exchange.order("xyz:AMAT", ...)` raised
+    # `KeyError: 'xyz:AMAT'`: the third and last silent no-op in this de-risk path
+    # (found 2026-08-15 with xyz:AMAT at 5.7% from liq, minutes after the
+    # position-lookup and allMids fixes above). src/main.py:121 does exactly this
+    # for the live engine's exchange; the operator's lever needs it too.
+    register_hip3_dexes(exchange.info, market_meta=market_meta)
     try:
         result = exchange.order(
             args.coin, is_buy, close_sz, limit_px,

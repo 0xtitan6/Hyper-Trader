@@ -114,6 +114,14 @@ class RiskConfig:
     # is how stale the cached margin reading may be before we stop trusting it
     # and fail OPEN (900s = 3 missed reconcile cycles).
     margin_headroom_buffer_frac: float = 0.20
+    # Gross-notional cap for EACH HIP-3 builder dex, applied separately from
+    # max_total_exposure_usd (which now covers the base clearinghouse only).
+    # Every builder dex settles against its own collateral, so one shared cap
+    # charges an `xyz:` order for risk carried on the base account — measured
+    # 2026-08-15 with base at 2.4x maintenance coverage and xyz at 14.6x while
+    # 40 of 40 blocked opens were xyz. Per-dex, not global: two dexes each at
+    # their limit is genuinely twice the risk, and this keeps that explicit.
+    max_dex_exposure_usd: float = 0.0
     margin_snapshot_max_age_s: float = 900.0
     # Explicit leverage. The bot never called update_leverage, so each asset sat
     # at whatever default HL picked (measured live 2026-08-14: JUP 10x, JTO/AR/
@@ -233,6 +241,10 @@ def load_config(path: str = "config.yaml", env: dict[str, str] | None = None) ->
         raise SystemExit(f"risk.allowed_market_types contains invalid entries: {bad}")
     if not risk.allowed_market_types:
         raise SystemExit("risk.allowed_market_types must list at least one market type")
+    if risk.max_dex_exposure_usd < 0:
+        raise SystemExit(
+            f"risk.max_dex_exposure_usd must be ≥ 0, got {risk.max_dex_exposure_usd}"
+        )
     if not (0.0 <= risk.margin_headroom_buffer_frac < 1.0):
         raise SystemExit(
             "risk.margin_headroom_buffer_frac must be in [0.0, 1.0), got "

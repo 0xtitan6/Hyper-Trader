@@ -13,6 +13,10 @@ def positions():
     p = MagicMock()
     p.realized_pnl_today.return_value = 0.0
     p.total_exposure_usd.return_value = 0.0
+    # Per-dex exposure (2026-08-15). Must be a real float: the cap compares it
+    # numerically, and a bare MagicMock silently poisons every test that opens
+    # a position rather than failing in an obvious place.
+    p.exposure_usd_for_dex.return_value = 0.0
     # Default: no existing position → reduce_only stays False
     p.state.get_position.return_value = (0.0, 0.0)
     # Default: no originator set → conflict-lock falls through (PR #25)
@@ -89,6 +93,8 @@ def test_daily_loss_blocks_and_alerts(cfg, positions, journal, exchange, outcome
 
 def test_exposure_cap_blocks(cfg, positions, journal, alerter, exchange, outcome_fill, market_meta):
     positions.total_exposure_usd.return_value = 499.0
+    # Base bucket ("" dex) holds the exposure now that the cap is per-dex.
+    positions.exposure_usd_for_dex.return_value = 499.0
     cfg2 = _override_risk(cfg, dry_run=False, max_total_exposure_usd=500)
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
     mt.on_leader_fill("0xleader", outcome_fill)
@@ -498,6 +504,7 @@ def test_no_reduce_only_when_flips_through_zero(
     positions = MagicMock()
     positions.realized_pnl_today.return_value = 0.0
     positions.total_exposure_usd.return_value = 0.0
+    positions.exposure_usd_for_dex.return_value = 0.0
     positions.state.get_position.return_value = (5.0, 0.5)
     cfg2 = _override_risk(cfg, dry_run=False)
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
@@ -1789,4 +1796,70 @@ def test_non_dex_perp_still_trades_on_default_precision(
     cfg2 = _perp_cfg(cfg)
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
     mt.on_leader_fill("0xleader", {**_xyz_fill(coin="SOMENEWPERP"), "tid": 2003})
+    exchange.order.assert_called_once()
+
+
+# --- per-dex exposure cap (2026-08-15) --------------------------------------
+# Each HIP-3 builder dex settles against its OWN collateral, so a single shared
+# cap charged xyz: orders for risk carried on the base account. Measured live:
+# base at 2.4x maintenance coverage, xyz at 14.6x, and 40 of 40 blocked opens
+# were xyz -- 39 of them xyz:SP500, 64% of our best leader's flow.
+
+def _dexcap_mirror(cfg, exchange, positions, journal, alerter, market_meta,
+                   by_dex, base_cap=100.0, dex_cap=100.0):
+    """`by_dex` maps dex prefix ("" = base) -> gross notional already held."""
+    positions.exposure_usd_for_dex.side_effect = lambda d: by_dex.get(d, 0.0)
+    positions.total_exposure_usd.return_value = sum(by_dex.values())
+    cfg2 = _override_risk(cfg, dry_run=False, max_total_exposure_usd=base_cap,
+                          max_dex_exposure_usd=dex_cap, allowed_market_types=["perp"])
+    market_meta.register_dex_assets(
+        [{"name": "xyz:SP500", "szDecimals": 4}, {"name": "flx:BTC", "szDecimals": 4}]
+    )
+    return MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+
+
+def test_base_exposure_does_not_block_a_dex_order(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """The live bug: base sits at its cap, so an xyz: open is refused even
+    though the xyz clearinghouse holds separate, barely-used collateral."""
+    mt = _dexcap_mirror(cfg, exchange, positions, journal, alerter, market_meta,
+                        by_dex={"": 99.0})
+    mt.on_leader_fill(
+        "0xleader", {"tid": 3001, "coin": "xyz:SP500", "px": "100", "sz": "1", "side": "B"}
+    )
+    exchange.order.assert_called_once()
+
+
+def test_dex_exposure_does_not_block_a_base_order(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Symmetric: a loaded xyz book must not throttle base perps."""
+    mt = _dexcap_mirror(cfg, exchange, positions, journal, alerter, market_meta,
+                        by_dex={"xyz": 99.0})
+    mt.on_leader_fill("0xleader", {"tid": 3002, "coin": "BTC", "px": "100", "sz": "1", "side": "B"})
+    exchange.order.assert_called_once()
+
+
+def test_dex_cap_still_binds_within_its_own_dex(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """This is a risk limit, not a bypass -- xyz still caps xyz."""
+    mt = _dexcap_mirror(cfg, exchange, positions, journal, alerter, market_meta,
+                        by_dex={"xyz": 99.0})
+    mt.on_leader_fill(
+        "0xleader", {"tid": 3003, "coin": "xyz:SP500", "px": "100", "sz": "1", "side": "B"}
+    )
+    exchange.order.assert_not_called()
+
+
+def test_two_dexes_are_capped_independently(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Per-dex, not one shared pool: flx at its limit must not gate xyz."""
+    mt = _dexcap_mirror(cfg, exchange, positions, journal, alerter, market_meta,
+                        by_dex={"flx": 99.0})
+    mt.on_leader_fill(
+        "0xleader", {"tid": 3004, "coin": "xyz:SP500", "px": "100", "sz": "1", "side": "B"}
+    )
     exchange.order.assert_called_once()
