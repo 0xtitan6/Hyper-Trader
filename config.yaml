@@ -102,7 +102,17 @@ discovery:
     "0x6cd520c1a07c9b53b33d62d04d3c2a3175161968": 1.0
     # 2026-08-14: concentrate on the sharpe leader (0.59 vs 0.26). Auto-weighting
     # had it at 1.36; 1.5 is a modest deliberate bump, not a new regime.
-    "0x819d06c03a978a86d6884b11fbca4d228ea0d106": 1.5
+    # 2026-08-15: 1.5 -> 2.0. Now that it actually executes (it placed ZERO
+    # orders in the 30 days before the exposure-cap fix), a fresh 30d backtest
+    # at $211 makes it strictly better than the other slot on every
+    # risk-adjusted measure: sharpe 0.48 vs 0.23, maxDD $3.23 (0.13x net) vs
+    # $10.02 (0.35x net), 75% hit vs 45%, +$0.08/trade vs +$0.04.
+    # Sizing note: at fixed_usd $30 this is a $60 clip (max_per_trade is $120).
+    # The base account is out of margin, so the extra size lands where the
+    # capacity actually is — 64% of this leader's flow is xyz:, which has its
+    # own collateral and its own $500 cap with room. +0.5 is the per-run bound
+    # the strategist works to; not exceeding it just because I'm doing it by hand.
+    "0x819d06c03a978a86d6884b11fbca4d228ea0d106": 2.0
     # Dropped from always_follow 2026-07-20 (0 trades / dead slot).
     # "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8": 1.2
 
