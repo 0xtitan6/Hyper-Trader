@@ -711,3 +711,72 @@ def test_hip3_exposure_is_visible_to_the_per_dex_cap(state, journal):
     pt.reconcile_with_user_state()
     assert abs(pt.exposure_usd_for_dex("xyz") - 389.0) < 1.0
     assert pt.exposure_usd_for_dex("") == 0.0
+
+
+# --- unified margin collateral (corrected 2026-08-15) -----------------------
+# This account settles base perps AND every HIP-3 dex against ONE spot USDC
+# balance, holding against it per position (proved to 6dp: xyz marginUsed
+# 64.424287 == spot hold 64.424287). Base `withdrawable` reads $0.00 whenever
+# no base position is open -- not "no money", just "nothing held yet" -- so
+# gating on it blocked every base-perp open while $151.78 sat available.
+
+
+def _spot(total="216.20", hold="64.42"):
+    return {"balances": [{"coin": "USDC", "total": total, "hold": hold}]}
+
+
+def test_free_collateral_uses_unencumbered_spot_usdc(state, journal):
+    info = MagicMock()
+    info.user_state.return_value = {
+        "assetPositions": [],
+        "marginSummary": {"accountValue": "0.0", "totalMarginUsed": "0.0"},
+        "withdrawable": "0.0",  # the misleading figure
+    }
+    info.post.side_effect = _post_router(spot=_spot())
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    snap = pt.margin_snapshot()
+    assert abs(snap.free_collateral_usd - 151.78) < 0.01  # not 0.0
+
+
+def test_falls_back_to_withdrawable_when_spot_unreadable(state, journal):
+    """Unknown spot must not read as broke -- fall back, don't halt."""
+    info = MagicMock()
+    info.user_state.return_value = {
+        "assetPositions": [],
+        "marginSummary": {"accountValue": "50.0", "totalMarginUsed": "10.0"},
+        "withdrawable": "40.0",
+    }
+    info.post.side_effect = _post_router(spot={"balances": []})
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    assert pt.margin_snapshot().free_collateral_usd == 40.0
+
+
+def test_malformed_usdc_balance_falls_back(state, journal):
+    info = MagicMock()
+    info.user_state.return_value = {
+        "assetPositions": [],
+        "marginSummary": {"accountValue": "50.0", "totalMarginUsed": "10.0"},
+        "withdrawable": "40.0",
+    }
+    info.post.side_effect = _post_router(
+        spot={"balances": [{"coin": "USDC", "total": "abc", "hold": "0"}]}
+    )
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    assert pt.margin_snapshot().free_collateral_usd == 40.0
+
+
+def test_fully_held_spot_reports_zero_not_negative(state, journal):
+    """hold > total (rounding/edge) must clamp at 0, never go negative."""
+    info = MagicMock()
+    info.user_state.return_value = {
+        "assetPositions": [],
+        "marginSummary": {"accountValue": "0.0", "totalMarginUsed": "0.0"},
+        "withdrawable": "0.0",
+    }
+    info.post.side_effect = _post_router(spot=_spot(total="10.0", hold="12.0"))
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    assert pt.margin_snapshot().free_collateral_usd == 0.0

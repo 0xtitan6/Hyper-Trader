@@ -19,6 +19,27 @@ def today_utc() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
+def _free_usdc(spot_state: dict) -> float | None:
+    """Unencumbered spot USDC = total - hold, or None if unreadable.
+
+    Under unified margin this IS our collateral for new positions on every
+    clearinghouse: HL places a `hold` on spot USDC per open position (verified
+    2026-08-15 — xyz marginUsed 64.424287 == spot hold 64.424287 exactly).
+
+    Returns None rather than 0.0 when the balance is missing or malformed, so
+    the caller can fall back to the perp figure instead of reading "unknown"
+    as "broke" and halting trading.
+    """
+    for b in (spot_state or {}).get("balances", []) or []:
+        if isinstance(b, dict) and b.get("coin") == "USDC":
+            try:
+                return max(0.0, float(b.get("total", 0) or 0) - float(b.get("hold", 0) or 0))
+            except (TypeError, ValueError):
+                log.warning("reconcile: malformed USDC balance %s", b)
+                return None
+    return None
+
+
 @dataclass(frozen=True)
 class MarginSnapshot:
     """Point-in-time view of HL's own margin accounting for our account.
@@ -127,29 +148,36 @@ class PositionTracker:
         with self._lock:
             return self._margin
 
-    def _capture_margin_snapshot(self, us: dict) -> None:
-        """Parse `marginSummary` / `withdrawable` out of a user_state payload.
+    def _capture_margin_snapshot(self, us: dict, spot_free_usdc: float | None = None) -> None:
+        """Record how much collateral is actually available to open new risk.
 
-        `withdrawable` is HL's own "how much could leave this account" figure —
-        it already nets out margin held by open orders and the maintenance
-        requirement, so it's the tightest honest answer to "can I open more".
-        We fall back to accountValue - totalMarginUsed if it's absent.
+        UNIFIED MARGIN (corrected 2026-08-15). This account settles every
+        clearinghouse — base perps AND each HIP-3 builder dex — against the one
+        spot USDC balance, placing a `hold` on it per open position. Proof, to
+        six decimals, at the moment of the fix:
 
-        Note this only covers the BASE perp clearinghouse. HIP-3 builder dexes
-        keep separate collateral (measured 2026-08-14: base withdrawable
-        $0.0096 vs xyz dex $0.0015), which is why the mirror doesn't gate HIP-3
-        coins on this number.
+            xyz dex marginUsed  64.424287
+            spot USDC hold      64.424287
+            spot USDC free      $151.78
+
+        The base perp `withdrawable` is therefore NOT our free collateral. With
+        no base positions open it reads $0.00 — not "no money", just "nothing
+        held yet" — and gating on it blocked every base-perp open while $151.78
+        sat available. That is a silent trade-suppression bug of exactly the
+        kind this guard exists to prevent, so prefer the spot figure and keep
+        `withdrawable` only as the fallback when spot is unreadable.
         """
         try:
             ms = us.get("marginSummary") or {}
             account_value = float(ms.get("accountValue", 0) or 0)
             margin_used = float(ms.get("totalMarginUsed", 0) or 0)
             raw_withdrawable = us.get("withdrawable")
-            free = (
+            fallback = (
                 float(raw_withdrawable)
                 if raw_withdrawable is not None
                 else account_value - margin_used
             )
+            free = spot_free_usdc if spot_free_usdc is not None else fallback
         except (TypeError, ValueError):
             log.warning("reconcile: malformed marginSummary %s", us.get("marginSummary"))
             return
@@ -348,7 +376,7 @@ class PositionTracker:
                 self.state.update_position(coin, 0.0, 0.0)
         # After the position writes, so exposure_at_snapshot_usd lines up with
         # the state the mirror will read.
-        self._capture_margin_snapshot(us)
+        self._capture_margin_snapshot(us, _free_usdc(sc))
         snap = self.margin_snapshot()
         self.journal.write(
             "reconcile",
