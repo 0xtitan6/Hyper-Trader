@@ -28,6 +28,134 @@ class TradeIntent:
     reduce_only: bool = False
 
 
+# --- Leader fill classification (2026-08-15) -------------------------------
+# `_build_intent` used to copy the leader's fill SIDE and never ask whether
+# that fill OPENED or CLOSED their position. When leader 0x819d06c0 bought to
+# cover a short in `xyz:SP500`, we bought too — and opened a LONG against their
+# short. Live 2026-08-15: 13 mirrored `Close Short` fills left us +0.035 long
+# while the leader sat -2.801 short. Closed by hand at 15:56; rebuilt itself,
+# larger, by 18:56. `grep -n 'dir' src/mirror.py` returned nothing — the field
+# was never read.
+#
+# Not an edge case. Over that leader's last 2,000 fills (pulled 2026-08-15):
+# 380 `Close Short` + 290 `Close Long` = 33.5% of everything we copy is the
+# leader EXITING. Strong candidate for the xyz realized -$87.03 (INV 10).
+#
+# We derive the classification ARITHMETICALLY from `startPosition` + `side` +
+# `sz`, not from HL's `dir` string: startPosition is authoritative and does not
+# depend on HL's labelling staying stable. `dir` is kept as a cross-check, and
+# as the fallback when startPosition is unreadable. Measured over those same
+# 2,000 fills the two agree 1,959/1,959 times (the remaining 41 carry
+# spot/settlement labels that have no open/close meaning).
+ACTION_OPEN = "open"
+ACTION_CLOSE = "close"
+ACTION_FLIP = "flip"
+ACTION_UNKNOWN = "unknown"
+
+# HL's own labels, used only as cross-check and fallback. Spot ("Buy"/"Sell")
+# and "Settlement" are deliberately absent: they carry no open/close meaning,
+# so a fill labelled that way whose startPosition is unreadable stays UNKNOWN
+# rather than being guessed at (INV 4).
+_DIR_ACTIONS = {
+    "Open Long": ACTION_OPEN,
+    "Open Short": ACTION_OPEN,
+    "Close Long": ACTION_CLOSE,
+    "Close Short": ACTION_CLOSE,
+    "Long > Short": ACTION_FLIP,
+    "Short > Long": ACTION_FLIP,
+}
+
+# Sizes arrive as HL-rounded decimal strings, so a bare `<=` would classify an
+# exact full close as a FLIP on float representation error alone.
+_SZ_EPSILON = 1e-9
+
+
+@dataclass(frozen=True)
+class FillAction:
+    """How a leader's fill changed THEIR position.
+
+    `open_sz` is the OPENING portion of the fill in leader units — the whole
+    fill for an open, zero for a close, and `sz - |startPosition|` for a flip
+    (the part that establishes the new side). It only affects proportional
+    sizing; under `mode: fixed` the clip is constant and this is informational.
+
+    `source` records which signal decided it ("start_position" | "dir" |
+    "none" | "invalid") so a fleet-wide fallback to `dir` is visible in the
+    journal instead of silent.
+    """
+
+    action: str
+    open_sz: float
+    source: str
+    dir_label: str | None
+    mismatch: bool
+
+
+def classify_leader_fill(fill: dict) -> FillAction:
+    """Classify a leader fill as OPEN / CLOSE / FLIP / UNKNOWN.
+
+    See the block comment above for why this exists and why the arithmetic —
+    not `dir` — is authoritative.
+    """
+    side = fill.get("side")
+    try:
+        sz = abs(float(fill.get("sz", 0)))
+    except (TypeError, ValueError):
+        sz = 0.0
+
+    raw_dir = fill.get("dir")
+    dir_label = raw_dir.strip() if isinstance(raw_dir, str) else None
+    dir_action = _DIR_ACTIONS.get(dir_label) if dir_label else None
+
+    # bool is an int subclass — a stray True would float() to 1.0 and be read
+    # as a real long position.
+    raw_start = fill.get("startPosition")
+    start_pos: float | None = None
+    if raw_start is not None and not isinstance(raw_start, bool):
+        try:
+            start_pos = float(raw_start)
+        except (TypeError, ValueError):
+            start_pos = None
+
+    if side not in ("B", "A") or sz <= 0:
+        # Malformed. The caller rejects this with its own reason before we get
+        # here; classifying it as anything else would be inventing a fact.
+        return FillAction(ACTION_UNKNOWN, 0.0, "invalid", dir_label, False)
+
+    if start_pos is None:
+        if dir_action is None:
+            # INV 4: UNKNOWN is never EMPTY. We do not know whether this fill
+            # opened or closed, so we do not act. Falling back to "just mirror
+            # the side" is precisely the bug this function exists to fix.
+            return FillAction(ACTION_UNKNOWN, 0.0, "none", dir_label, False)
+        # `dir` names the action but not the split, so for a flip the opening
+        # portion is unknowable and the full size is the only estimate we have.
+        return FillAction(
+            dir_action,
+            0.0 if dir_action == ACTION_CLOSE else sz,
+            "dir",
+            dir_label,
+            False,
+        )
+
+    is_buy = side == "B"
+    if start_pos == 0.0 or (start_pos > 0) == is_buy:
+        # Flat, or trading the side they already hold → entering/adding.
+        action, open_sz = ACTION_OPEN, sz
+    elif sz <= abs(start_pos) + _SZ_EPSILON:
+        action, open_sz = ACTION_CLOSE, 0.0
+    else:
+        action, open_sz = ACTION_FLIP, sz - abs(start_pos)
+
+    return FillAction(
+        action,
+        open_sz,
+        "start_position",
+        dir_label,
+        dir_action is not None and dir_action != action,
+    )
+
+
 # In-flight TTL — how long after submit do we count an order toward exposure
 # before assuming the own-fill WS feedback has updated PositionTracker. Set
 # longer than typical HL WS round-trip (~100-500ms) but short enough that a
@@ -153,6 +281,7 @@ class MirrorTrader:
         # re-dispatches the same leader fill and double-trades.
         submit_attempted = False
         try:
+            action = classify_leader_fill(fill)
             self.journal.write(
                 "leader_fill",
                 leader=leader,
@@ -161,61 +290,110 @@ class MirrorTrader:
                 px=fill.get("px"),
                 sz=fill.get("sz"),
                 side=fill.get("side"),
+                action=action.action,
+                action_source=action.source,
+                dir=action.dir_label,
             )
-            intent, skip_reason = self._build_intent(fill, leader)
-            if intent is None:
-                # `skip_reason` is deliberately specific — see _build_intent's
-                # docstring. Never collapse these back into one token.
-                self.journal.write("intent_skipped", leader=leader, tid=tid, reason=skip_reason)
-                return
-            with self._submit_lock:
-                # Re-evaluate reduce_only inside the lock — position state may
-                # have changed (own-fill arrived) between _build_intent and here.
-                intent = replace(
-                    intent,
-                    reduce_only=self._is_reduce_only(intent.coin, intent.is_buy, intent.sz),
+            if action.mismatch:
+                # Non-fatal: startPosition is authoritative and wins. Journalled
+                # so that HL changing its labelling shows up as a measurable
+                # divergence instead of quietly rotting the cross-check.
+                log.warning(
+                    "[classify] dir=%r disagrees with startPosition arithmetic (%s) "
+                    "leader=%s tid=%s coin=%s",
+                    action.dir_label, action.action, leader[:10], tid, fill.get("coin"),
                 )
-                # Per-coin weight-priority conflict lock (PR #25). Caught
-                # 2026-05-10: two leaders took opposite sides on TON within
-                # 30 min and we whipsawed -$1.85 across both legs. Rule:
-                # if our existing position on this coin was opened by a
-                # different leader AND new fill is opposite-direction AND
-                # current leader has lower weight than originator → skip.
-                conflict_reason = self._check_leader_conflict(intent, leader)
-                if conflict_reason is not None:
-                    log.info(
-                        "[conflict] skip leader=%s coin=%s reason=%s",
-                        leader[:10], intent.coin, conflict_reason,
-                    )
-                    self.journal.write(
-                        "intent_skipped", leader=leader, tid=tid,
-                        reason=f"leader_conflict:{conflict_reason}",
-                    )
-                    return
-                ok, reason = self._risk_check(intent)
                 self.journal.write(
-                    "risk_check",
+                    "fill_action_mismatch",
                     leader=leader,
                     tid=tid,
-                    ok=ok,
-                    reason=reason,
-                    intent=asdict(intent),
+                    coin=fill.get("coin"),
+                    derived=action.action,
+                    dir=action.dir_label,
                 )
-                if not ok:
-                    log.info(
-                        "[risk] reject (%s) leader=%s coin=%s", reason, leader[:10], intent.coin
+            # Validate BEFORE acting on the classification: a malformed fill is
+            # also an unclassifiable one, and it deserves the more specific of
+            # the two reasons.
+            basics, basics_reason = self._fill_basics(fill)
+            if basics is None:
+                self.journal.write(
+                    "intent_skipped", leader=leader, tid=tid, reason=basics_reason
+                )
+                return
+            coin, px, fill_sz, is_buy = basics
+            if not self._is_allowed_market(coin):
+                self.journal.write(
+                    "intent_skipped", leader=leader, tid=tid, reason="market_type"
+                )
+                return
+
+            if action.action == ACTION_UNKNOWN:
+                # INV 4/5: we cannot tell an entry from an exit, so we do not
+                # trade it, and the skip gets its own greppable reason.
+                self.journal.write(
+                    "intent_skipped", leader=leader, tid=tid, reason="unknown_fill_action"
+                )
+                return
+
+            # OPEN leg. A CLOSE never has one — that is the whole fix.
+            open_intent: TradeIntent | None = None
+            if action.action in (ACTION_OPEN, ACTION_FLIP):
+                open_intent, skip_reason = self._build_intent(
+                    fill, leader, sizing_sz=action.open_sz
+                )
+                if open_intent is None:
+                    # `skip_reason` is deliberately specific — see _build_intent's
+                    # docstring. Never collapse these back into one token.
+                    self.journal.write(
+                        "intent_skipped", leader=leader, tid=tid, reason=skip_reason
                     )
+                    if action.action == ACTION_OPEN:
+                        return
+                    # FLIP: sizing rejected the new entry, but the leader has
+                    # still LEFT the old side, so the close leg must still run.
+
+            with self._submit_lock:
+                # CLOSE leg first: the leader reduced or flipped, so we shrink
+                # (never grow) our own position on this coin. Built inside the
+                # lock because it is sized from live position state.
+                if action.action in (ACTION_CLOSE, ACTION_FLIP):
+                    close_intent, close_reason = self._build_close_intent(
+                        coin, px, is_buy, leader, fill_sz,
+                        full=(action.action == ACTION_FLIP),
+                    )
+                    if close_intent is None:
+                        self.journal.write(
+                            "intent_skipped", leader=leader, tid=tid, reason=close_reason
+                        )
+                    else:
+                        attempted, _ = self._dispatch(close_intent, leader, tid)
+                        submit_attempted = submit_attempted or attempted
+                    if action.action == ACTION_CLOSE:
+                        return
+
+                if open_intent is None:
                     return
-                # Mark BEFORE the call: _submit places the live order internally,
-                # so if it raises (or anything after it does) the order may
-                # already exist and the tid must stay marked.
-                submit_attempted = True
-                submitted = self._submit(intent, leader, tid)
+                if action.action == ACTION_OPEN:
+                    # Re-evaluate reduce_only inside the lock — position state may
+                    # have changed (own-fill arrived) between _build_intent and here.
+                    open_intent = replace(
+                        open_intent,
+                        reduce_only=self._is_reduce_only(
+                            open_intent.coin, open_intent.is_buy, open_intent.sz
+                        ),
+                    )
+                # FLIP deliberately skips that re-evaluation. We just submitted a
+                # full close of the old side, but its own-fill confirmation
+                # arrives over the WS, not synchronously — so _is_reduce_only
+                # would still see the PRE-close position, mark the new entry
+                # reduce-only, and leave us flat instead of flipped.
+                attempted, submitted = self._dispatch(open_intent, leader, tid)
+                submit_attempted = submit_attempted or attempted
                 # Record this leader as the position's originator only if the
                 # order was actually accepted — a rejected order must not claim
                 # the coin (else conflict-lock blocks the real originator).
                 if submitted:
-                    self.positions.state.set_position_originator(intent.coin, leader)
+                    self.positions.state.set_position_originator(coin, leader)
         except UnknownPrecisionError as e:
             # A HIP-3 builder-dex coin (`xyz:*`) whose szDecimals never
             # arrived — `register_hip3_dexes: perpDexs fetch failed` fired 215
@@ -272,7 +450,161 @@ class MirrorTrader:
             if isinstance(tid, int) and not submit_attempted:
                 self.positions.state.unmark_tid_seen(tid)
 
-    def _build_intent(self, fill: dict, leader: str = "") -> tuple[TradeIntent | None, str]:
+    def _dispatch(
+        self, intent: TradeIntent, leader: str, tid: object
+    ) -> tuple[bool, bool]:
+        """Conflict-check, risk-check and submit one intent.
+
+        Returns `(submit_attempted, submitted)`. `submit_attempted` is True once
+        `_submit` has been entered — from that moment a live order may exist, so
+        `on_leader_fill` must keep the tid marked even if something later raises
+        (else backfill re-dispatches the fill and double-trades).
+
+        Caller must hold `_submit_lock`.
+        """
+        # Per-coin weight-priority conflict lock (PR #25). Caught 2026-05-10:
+        # two leaders took opposite sides on TON within 30 min and we whipsawed
+        # -$1.85 across both legs. Rule: if our existing position on this coin
+        # was opened by a different leader AND new fill is opposite-direction
+        # AND current leader has lower weight than originator → skip.
+        conflict_reason = self._check_leader_conflict(intent, leader)
+        if conflict_reason is not None:
+            log.info(
+                "[conflict] skip leader=%s coin=%s reason=%s",
+                leader[:10], intent.coin, conflict_reason,
+            )
+            self.journal.write(
+                "intent_skipped", leader=leader, tid=tid,
+                reason=f"leader_conflict:{conflict_reason}",
+            )
+            return False, False
+        ok, reason = self._risk_check(intent)
+        self.journal.write(
+            "risk_check",
+            leader=leader,
+            tid=tid,
+            ok=ok,
+            reason=reason,
+            intent=asdict(intent),
+        )
+        if not ok:
+            log.info("[risk] reject (%s) leader=%s coin=%s", reason, leader[:10], intent.coin)
+            return False, False
+        return True, self._submit(intent, leader, tid)
+
+    @staticmethod
+    def _fill_basics(
+        fill: dict,
+    ) -> tuple[tuple[str, float, float, bool] | None, str]:
+        """`((coin, px, sz, is_buy), "ok")`, or `(None, reason)`.
+
+        Same validation `_build_intent` applies, and it MUST keep returning the
+        same two distinct reasons (INV 5 — `bad_fill_numbers` for an unparseable
+        number, `bad_fill_fields` for a missing/nonsensical one). Hoisted here
+        because a CLOSE leg is sized from our own position and so never goes
+        through `_build_intent`.
+        """
+        coin = fill.get("coin")
+        side = fill.get("side")
+        try:
+            px = float(fill.get("px", 0))
+            sz = float(fill.get("sz", 0))
+        except (TypeError, ValueError):
+            return None, "bad_fill_numbers"
+        if not coin or px <= 0 or sz <= 0 or side not in ("B", "A"):
+            return None, "bad_fill_fields"
+        return (coin, px, sz, side == "B"), "ok"
+
+    def _raw_mirror_notional(self, leader_notional: float, leader: str) -> float | None:
+        """Our clip for a leader fill of `leader_notional`, before any minimum,
+        funding adjustment or cap. None means the sizing mode is unusable.
+        """
+        s = self.cfg.sizing
+        weight = self._leader_weights.get(leader.lower(), 1.0) if leader else 1.0
+        if s.mode == "proportional":
+            return leader_notional * s.proportional_fraction * weight
+        if s.mode == "fixed":
+            return float(s.fixed_usd) * weight
+        return None
+
+    def _build_close_intent(
+        self,
+        coin: str,
+        px: float,
+        is_buy: bool,
+        leader: str,
+        leader_sz: float,
+        full: bool,
+    ) -> tuple[TradeIntent | None, str]:
+        """Size a leader EXIT into a reduce-only order against our position.
+
+        Added 2026-08-15 with `classify_leader_fill` — see the block comment on
+        that function for the incident. The rule that actually fixes it: a
+        leader closing can only ever SHRINK us. If we do not hold the side they
+        are leaving, we place nothing at all; we never open the opposite side.
+
+        `full=True` (a FLIP) closes our position outright, because the leader has
+        left that side entirely and is now on the other one.
+
+        Sizing deliberately skips `_build_intent`'s minimum-notional gate and
+        its round-up rescue. Both exist to protect ENTRIES: applying them here
+        would either refuse to let us out of a small position (INV 5 — a guard
+        that silently drops trades is a bug) or round an exit UP past what we
+        hold. Sizes round DOWN only, and are clamped to our position, so this
+        path can never increase absolute exposure on the coin.
+
+        Caller must hold `_submit_lock`: this reads live position state.
+        """
+        existing_sz, _ = self.positions.state.get_position(coin)
+        # isinstance, not a bare truth test: PositionTracker is a MagicMock in
+        # much of the suite and in the shadow/backtest harnesses, where any
+        # attribute is a truthy mock. Same defence as _check_leader_conflict.
+        if not isinstance(existing_sz, (int, float)) or isinstance(existing_sz, bool):
+            return None, "leader_closing_position_unreadable"
+        if existing_sz == 0:
+            return None, "leader_closing_we_are_flat"
+        # Our order takes the leader's side. It only reduces us if we hold the
+        # opposite of that side — which is, by definition of a close, the same
+        # side the leader is leaving.
+        reduces = (existing_sz > 0 and not is_buy) or (existing_sz < 0 and is_buy)
+        if not reduces:
+            # We are on the WRONG side already (usually a position this very bug
+            # built). Mirroring the leader's exit here would ADD to it.
+            return None, "leader_closing_we_hold_opposite"
+
+        if full:
+            target_sz = abs(existing_sz)
+        else:
+            notional = self._raw_mirror_notional(px * leader_sz, leader)
+            if notional is None:
+                return None, "bad_sizing_mode"
+            notional = min(notional, self.cfg.sizing.max_per_trade_usd)
+            target_sz = min(notional / px, abs(existing_sz))
+
+        rounded_px = self.market_meta.round_price(px, coin)
+        # Round DOWN, always: rounding an exit up would exceed the position and
+        # HL rejects a reduce-only order it cannot satisfy. Deliberately not
+        # catching UnknownPrecisionError — on_leader_fill owns that path.
+        rounded_sz = self.market_meta.round_size(coin, target_sz)
+        if rounded_sz <= 0:
+            return None, "close_rounds_to_zero"
+        if rounded_sz > abs(existing_sz) + _SZ_EPSILON:
+            # Belt and braces: `round_size` floors, so this should be
+            # unreachable. If a future rounder ever rounds to nearest, the
+            # "a close never grows us" guarantee still has to hold.
+            return None, "close_exceeds_position"
+        return TradeIntent(
+            coin=coin,
+            is_buy=is_buy,
+            sz=rounded_sz,
+            limit_px=rounded_px,
+            notional_usd=rounded_sz * rounded_px,
+            reduce_only=True,
+        ), "ok"
+
+    def _build_intent(
+        self, fill: dict, leader: str = "", sizing_sz: float | None = None
+    ) -> tuple[TradeIntent | None, str]:
         """Size a leader fill into our own order.
 
         Returns `(intent, reason)`. On success `reason` is "ok"; on a skip
@@ -283,6 +615,12 @@ class MirrorTrader:
         days — so a leader that had been muted by a sizing bug for 24 days was
         indistinguishable from a leader trading markets we simply don't allow.
         Any new skip added below MUST get its own reason.
+
+        `sizing_sz` overrides the leader size used to value the clip. It is the
+        OPENING portion of a FLIP: on `Short > Long` only `sz - |startPosition|`
+        establishes the new side, and charging the whole fill would size the new
+        entry off the leader's exit too. Under `mode: fixed` the clip is
+        constant and this changes nothing.
         """
         coin = fill.get("coin")
         try:
@@ -297,14 +635,14 @@ class MirrorTrader:
             return None, "market_type"
 
         is_buy = side == "B"
-        leader_notional = px * sz
         s = self.cfg.sizing
-        weight = self._leader_weights.get(leader.lower(), 1.0) if leader else 1.0
-        if s.mode == "proportional":
-            mirror_notional = leader_notional * s.proportional_fraction * weight
-        elif s.mode == "fixed":
-            mirror_notional = float(s.fixed_usd) * weight
-        else:
+        sizing_basis = sz if sizing_sz is None else sizing_sz
+        if sizing_basis <= 0:
+            # A flip whose opening portion rounds away entirely — there is no
+            # new entry to make, only the close leg the caller already ran.
+            return None, "flip_open_leg_empty"
+        mirror_notional = self._raw_mirror_notional(px * sizing_basis, leader)
+        if mirror_notional is None:
             return None, "bad_sizing_mode"
 
         # Outcomes have a separate (typically higher) min — HL enforces $10

@@ -96,7 +96,7 @@ def test_full_pipeline_dry_run(cfg, market_meta, tmp_path: Path):
             "data": {
                 "isSnapshot": True,
                 "fills": [
-                    {"tid": 1, "coin": "#11", "px": "0.5", "sz": "100", "side": "B"},
+                    {"tid": 1, "coin": "#11", "px": "0.5", "sz": "100", "startPosition": "0", "side": "B"},
                 ],
             }
         }
@@ -114,7 +114,7 @@ def test_full_pipeline_dry_run(cfg, market_meta, tmp_path: Path):
                         "coin": "#11",
                         "px": "0.50",
                         "sz": "100",
-                        "side": "B",
+                        "startPosition": "0", "side": "B",
                         "time": 1714000000000,
                         "fee": "0.05",
                         "closedPnl": "0",
@@ -140,7 +140,7 @@ def test_full_pipeline_dry_run(cfg, market_meta, tmp_path: Path):
             "data": {
                 "isSnapshot": False,
                 "fills": [
-                    {"tid": 1, "coin": "#11", "px": "0.5", "sz": "100", "side": "B"},
+                    {"tid": 1, "coin": "#11", "px": "0.5", "sz": "100", "startPosition": "0", "side": "B"},
                 ],
             }
         }
@@ -199,7 +199,7 @@ def test_pipeline_with_live_order_submission(cfg, market_meta, tmp_path: Path):
                         "coin": "#11",
                         "px": "0.50",
                         "sz": "100",
-                        "side": "B",
+                        "startPosition": "0", "side": "B",
                         "time": 1714000000000,
                         "fee": "0",
                         "closedPnl": "0",
