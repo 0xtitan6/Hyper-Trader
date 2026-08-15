@@ -6,14 +6,26 @@ from unittest.mock import MagicMock
 
 import pytest
 
+import json
+
 from src.leader_reconcile import (
     STATUS_CLOSED,
+    STATUS_DROPPED,
     STATUS_FLIPPED,
     STATUS_OK,
     STATUS_ORPHAN,
     STATUS_UNKNOWN,
     LeaderReconciler,
 )
+
+
+def _journal_events(journal) -> list[dict]:
+    """Parsed journal lines, or [] if nothing was ever written."""
+    try:
+        with open(journal.path) as f:
+            return [json.loads(ln) for ln in f if ln.strip()]
+    except FileNotFoundError:
+        return []
 
 
 # --- helpers ---------------------------------------------------------------
@@ -502,3 +514,291 @@ def test_genuinely_closed_hip3_position_still_detected(state, journal):
     state.set_position_originator("xyz:SKHX", "0xlead")
     lr = _hip3_reconciler(state, journal, {"BTC": 1.0}, {"xyz": {}})
     assert lr.reconcile(["0xlead"]).get("xyz:SKHX") == STATUS_CLOSED
+
+
+# --- dropped-leader orphans (BACKLOG P1) -----------------------------------
+#
+# `reconcile()` only ever sees a leader EXIT their own position. Removing a
+# leader from config/discovery leaves everything they opened stranded: the
+# follower never unsubscribes, so the leader stays readable and their mirror
+# classifies `ok` forever. Four such mirrors (JUP, JTO, AR, XMR from two
+# leaders dropped in July) held 100% of base margin by 2026-08-15.
+#
+# `check_dropped_leaders` is detect-only: journal + one alert per coin, never
+# a close.
+
+
+def _dropped_reconciler(state, journal, **kw) -> LeaderReconciler:
+    """A reconciler whose Info would EXPLODE if touched — check_dropped_leaders
+    must be a pure state read (that is what makes it safe on startup)."""
+    info = MagicMock()
+    info.user_state.side_effect = AssertionError("must not hit the network")
+    info.post.side_effect = AssertionError("must not hit the network")
+    info.all_mids.side_effect = AssertionError("must not hit the network")
+    kw.setdefault("auto_close", True)  # live config value; must still not close
+    return LeaderReconciler(
+        info=info,
+        state=state,
+        journal=journal,
+        alerter=kw.pop("alerter", MagicMock()),
+        exchange=kw.pop("exchange", None),
+        market_meta=None,
+        auto_close=kw.pop("auto_close"),
+        debounce_cycles=2,
+        slippage_bps=50.0,
+        manual_holdings=kw.pop("manual_holdings", None),
+        # Default to 1 so each test isolates ONE behaviour; the production
+        # value (2) has its own tests below.
+        dropped_confirm_passes=kw.pop("confirm", 1),
+    )
+
+
+def test_dropped_originator_is_flagged(state, journal):
+    state.update_position("JUP", 12.0, 0.85)
+    state.set_position_originator("JUP", "0xGONE")
+    r = _dropped_reconciler(state, journal)
+    assert r.check_dropped_leaders(["0xSTILLHERE"])["JUP"] == STATUS_DROPPED
+
+
+def test_followed_originator_is_not_flagged(state, journal):
+    state.update_position("JUP", 12.0, 0.85)
+    state.set_position_originator("JUP", "0xABC")
+    r = _dropped_reconciler(state, journal)
+    assert r.check_dropped_leaders(["0xABC", "0xDEF"])["JUP"] == STATUS_OK
+
+
+def test_dropped_check_is_case_insensitive(state, journal):
+    """Addresses arrive lowercased from the follower but mixed-case from
+    config — a case mismatch would flag every live position as dropped."""
+    state.update_position("JUP", 12.0, 0.85)
+    state.set_position_originator("JUP", "0xAbCdEf")
+    r = _dropped_reconciler(state, journal)
+    assert r.check_dropped_leaders(["0xABCDEF"])["JUP"] == STATUS_OK
+
+
+def test_unknown_originator_is_unknown_not_dropped(state, journal):
+    """INV 4: an unreadable originator means we do not KNOW whose position this
+    is — it must never be reported as dropped."""
+    state.update_position("JUP", 12.0, 0.85)  # no originator recorded
+    r = _dropped_reconciler(state, journal)
+    out = r.check_dropped_leaders(["0xABC"])
+    assert out["JUP"] == STATUS_UNKNOWN
+    assert out["JUP"] != STATUS_DROPPED
+
+
+def test_empty_leader_set_is_unknown_not_dropped(state, journal, tmp_path):
+    """INV 4: discovery returning nothing is 'we do not know the followed set',
+    NOT 'every leader was dropped'. Flagging the whole book here is the same
+    class of bug that tried to auto-close six live positions on 2026-08-15."""
+    state.update_position("JUP", 12.0, 0.85)
+    state.set_position_originator("JUP", "0xGONE")
+    alerter = MagicMock()
+    r = _dropped_reconciler(state, journal, alerter=alerter)
+    assert r.check_dropped_leaders([])["JUP"] == STATUS_UNKNOWN
+    assert r.check_dropped_leaders(None)["JUP"] == STATUS_UNKNOWN
+    alerter.alert.assert_not_called()
+    assert not _journal_events(journal)
+
+
+def test_empty_leader_set_does_not_suppress_later_detection(state, journal):
+    """Fail-open must not become never-act (INV 4, second direction): once a
+    real followed set arrives, the orphan must still be flagged."""
+    state.update_position("JUP", 12.0, 0.85)
+    state.set_position_originator("JUP", "0xGONE")
+    r = _dropped_reconciler(state, journal)
+    assert r.check_dropped_leaders([])["JUP"] == STATUS_UNKNOWN
+    assert r.check_dropped_leaders(["0xSTILLHERE"])["JUP"] == STATUS_DROPPED
+
+
+def test_manual_holding_exempt_from_dropped_check(state, journal):
+    """xyz:SPCX / #1420 / #1430 are operator trades with no originator at all."""
+    state.update_position("xyz:SPCX", 1.0, 100.0)
+    state.update_position("JUP", 12.0, 0.85)
+    state.set_position_originator("JUP", "0xGONE")
+    r = _dropped_reconciler(state, journal, manual_holdings=["XYZ:spcx"])
+    out = r.check_dropped_leaders(["0xSTILLHERE"])
+    assert "xyz:SPCX" not in out
+    assert out["JUP"] == STATUS_DROPPED
+
+
+def test_zero_size_position_not_flagged_as_dropped(state, journal):
+    state.update_position("JUP", 0.0, 0.0)
+    r = _dropped_reconciler(state, journal)
+    assert "JUP" not in r.check_dropped_leaders(["0xSTILLHERE"])
+
+
+def test_dropped_never_auto_closes_even_when_auto_close_on(state, journal):
+    """AC-2: closing is a money action and stays with the operator. Live config
+    has leader_exit_auto_close: true, so this is the load-bearing assertion."""
+    state.update_position("JUP", 12.0, 0.85)
+    state.set_position_originator("JUP", "0xGONE")
+    exchange = MagicMock()
+    r = _dropped_reconciler(state, journal, auto_close=True, exchange=exchange)
+    for _ in range(5):  # well past debounce_cycles
+        r.check_dropped_leaders(["0xSTILLHERE"])
+    exchange.order.assert_not_called()
+
+
+def test_dropped_does_not_disturb_reconcile_debounce(state, journal):
+    """The drop check must not count as a reconcile cycle — otherwise a refresh
+    landing next to the 5-min timer would satisfy the auto-close debounce with
+    two 'cycles' seconds apart."""
+    state.update_position("JUP", 12.0, 0.85)
+    state.set_position_originator("JUP", "0xGONE")
+    r = _dropped_reconciler(state, journal)
+    for _ in range(5):
+        r.check_dropped_leaders(["0xSTILLHERE"])
+    assert r._stale_counts == {}
+
+
+def test_dropped_alert_is_throttled_to_one_per_coin(state, journal):
+    """AC-2: a dropped leader is a standing condition. Without throttling this
+    re-fires on every leader refresh (10 min) forever."""
+    state.update_position("JUP", 12.0, 0.85)
+    state.set_position_originator("JUP", "0xGONE")
+    alerter = MagicMock()
+    r = _dropped_reconciler(state, journal, alerter=alerter)
+    for _ in range(4):
+        r.check_dropped_leaders(["0xSTILLHERE"])
+    assert alerter.alert.call_count == 1
+    assert len(_journal_events(journal)) == 1
+
+
+def test_dropped_journal_reason_and_fields(state, journal):
+    state.update_position("JUP", 12.0, 0.85)
+    state.set_position_originator("JUP", "0xGONE")
+    r = _dropped_reconciler(state, journal)
+    r.check_dropped_leaders(["0xSTILLHERE"])
+    (ev,) = _journal_events(journal)
+    assert ev["event"] == "dropped_leader_orphan"
+    assert ev["coin"] == "JUP"
+    assert ev["originator"] == "0xgone"
+    assert ev["our_sz"] == 12.0
+    assert ev["our_avg_px"] == 0.85
+
+
+def test_dropped_two_coins_alert_separately(state, journal):
+    """Throttle is per coin, not global — JUP must not mute JTO."""
+    state.update_position("JUP", 12.0, 0.85)
+    state.set_position_originator("JUP", "0xGONE")
+    state.update_position("JTO", 5.0, 2.10)
+    state.set_position_originator("JTO", "0xALSOGONE")
+    alerter = MagicMock()
+    r = _dropped_reconciler(state, journal, alerter=alerter)
+    r.check_dropped_leaders(["0xSTILLHERE"])
+    r.check_dropped_leaders(["0xSTILLHERE"])
+    assert alerter.alert.call_count == 2
+    assert {e["coin"] for e in _journal_events(journal)} == {"JUP", "JTO"}
+
+
+def test_readding_leader_rearms_the_alert(state, journal):
+    """If the operator re-adds the leader and later drops them again, we must
+    alert again — the throttle is not a permanent mute."""
+    state.update_position("JUP", 12.0, 0.85)
+    state.set_position_originator("JUP", "0xGONE")
+    alerter = MagicMock()
+    r = _dropped_reconciler(state, journal, alerter=alerter)
+    r.check_dropped_leaders(["0xSTILLHERE"])          # dropped -> alert
+    assert r.check_dropped_leaders(["0xGONE"])["JUP"] == STATUS_OK  # re-added
+    r.check_dropped_leaders(["0xSTILLHERE"])          # dropped again -> alert
+    assert alerter.alert.call_count == 2
+
+
+def test_closing_the_position_rearms_the_alert(state, journal):
+    state.update_position("JUP", 12.0, 0.85)
+    state.set_position_originator("JUP", "0xGONE")
+    alerter = MagicMock()
+    r = _dropped_reconciler(state, journal, alerter=alerter)
+    r.check_dropped_leaders(["0xSTILLHERE"])
+    state.update_position("JUP", 0.0, 0.0)  # operator closed it
+    assert "JUP" not in r.check_dropped_leaders(["0xSTILLHERE"])
+    state.update_position("JUP", 3.0, 0.90)
+    state.set_position_originator("JUP", "0xGONE")
+    r.check_dropped_leaders(["0xSTILLHERE"])
+    assert alerter.alert.call_count == 2
+
+
+def test_hip3_mirror_of_dropped_leader_is_flagged(state, journal):
+    """Drop detection is a state read, so it is not subject to INV 1 — an
+    xyz:* mirror is flagged exactly like a base-dex one, with no dex fetch."""
+    state.update_position("xyz:SP500", 0.5, 6100.0)
+    state.set_position_originator("xyz:SP500", "0xGONE")
+    r = _dropped_reconciler(state, journal)
+    assert r.check_dropped_leaders(["0xSTILLHERE"])["xyz:SP500"] == STATUS_DROPPED
+
+
+def test_reconcile_never_returns_dropped_status(state, journal):
+    """The two paths stay separate: reconcile() classifies against fetched
+    leader books and must keep its existing statuses only."""
+    state.update_position("BTC", -0.5, 60000.0)
+    state.set_position_originator("BTC", "0xABC")
+    r = _make_reconciler(state, journal, {"0xabc": {}})
+    assert r.reconcile(["0xABC"])["BTC"] == STATUS_CLOSED
+
+
+def test_dropped_requires_confirmation_passes_before_alerting(state, journal):
+    """Only 4 of our ~9 slots are auto-discovered and they rotate on rank — a
+    leader can leave the top-4 for one refresh and come straight back. One
+    observation is not enough to page the operator."""
+    state.update_position("JUP", 12.0, 0.85)
+    state.set_position_originator("JUP", "0xGONE")
+    alerter = MagicMock()
+    r = _dropped_reconciler(state, journal, alerter=alerter, confirm=2)
+    assert r.check_dropped_leaders(["0xSTILLHERE"])["JUP"] == STATUS_DROPPED
+    alerter.alert.assert_not_called()
+    r.check_dropped_leaders(["0xSTILLHERE"])
+    alerter.alert.assert_called_once()
+
+
+def test_flapping_leader_never_alerts(state, journal):
+    """Leader drops out of the top-N and returns, repeatedly. The confirmation
+    counter must reset each time they come back."""
+    state.update_position("JUP", 12.0, 0.85)
+    state.set_position_originator("JUP", "0xFLAP")
+    alerter = MagicMock()
+    r = _dropped_reconciler(state, journal, alerter=alerter, confirm=2)
+    for _ in range(6):
+        r.check_dropped_leaders(["0xSTILLHERE"])   # out of the top-N
+        r.check_dropped_leaders(["0xFLAP"])        # back in
+    alerter.alert.assert_not_called()
+
+
+def test_confirmation_does_not_become_never_alert(state, journal):
+    """Fail-open must not become never-act (INV 4): a leader that stays gone
+    still gets reported once the confirmation threshold is met."""
+    state.update_position("JUP", 12.0, 0.85)
+    state.set_position_originator("JUP", "0xFLAP")
+    alerter = MagicMock()
+    r = _dropped_reconciler(state, journal, alerter=alerter, confirm=2)
+    r.check_dropped_leaders(["0xSTILLHERE"])
+    r.check_dropped_leaders(["0xFLAP"])       # flap back — resets
+    r.check_dropped_leaders(["0xSTILLHERE"])  # gone for good now
+    r.check_dropped_leaders(["0xSTILLHERE"])
+    alerter.alert.assert_called_once()
+
+
+def test_confirm_passes_floored_at_one(state, journal):
+    """A misconfigured 0 must not disable detection entirely (INV 5: a guard
+    that silently drops everything is a bug, not safety)."""
+    state.update_position("JUP", 12.0, 0.85)
+    state.set_position_originator("JUP", "0xGONE")
+    alerter = MagicMock()
+    r = _dropped_reconciler(state, journal, alerter=alerter, confirm=0)
+    r.check_dropped_leaders(["0xSTILLHERE"])
+    alerter.alert.assert_called_once()
+
+
+def test_empty_leader_set_does_not_advance_confirmation(state, journal):
+    """An unknown followed set is not evidence of a drop — it must not count
+    toward the confirmation threshold."""
+    state.update_position("JUP", 12.0, 0.85)
+    state.set_position_originator("JUP", "0xGONE")
+    alerter = MagicMock()
+    r = _dropped_reconciler(state, journal, alerter=alerter, confirm=2)
+    for _ in range(5):
+        r.check_dropped_leaders([])
+    alerter.alert.assert_not_called()
+    r.check_dropped_leaders(["0xSTILLHERE"])
+    alerter.alert.assert_not_called()
+    r.check_dropped_leaders(["0xSTILLHERE"])
+    alerter.alert.assert_called_once()
