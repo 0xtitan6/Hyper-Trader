@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 import signal
 import sys
 import threading
@@ -377,4 +378,27 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # os._exit, not sys.exit, on the failure path.
+    #
+    # Incident 2026-08-15 03:09 UTC: preflight failed on a transient 429 and
+    # raised. `Info(...)` had already opened its websocket, and that reader is
+    # a NON-DAEMON thread, so the interpreter would not exit — the process sat
+    # alive, holding a PID, having aborted before it followed a single leader.
+    # systemd reported `active`, the watchdog saw a live pid, and the operator
+    # cron's engine count read 1. Every liveness check we own said HEALTHY
+    # while the bot traded nothing. A clean crash is strictly safer than that,
+    # because Restart=always then actually restarts us.
+    #
+    # os._exit skips atexit/finally, which is exactly right here: this path is
+    # reached only when startup already failed, so there is no journal to flush
+    # and no order in flight. The normal (rc == 0) path still returns through
+    # sys.exit so real shutdown cleanup runs.
+    rc = 1
+    try:
+        rc = main()
+    except BaseException:
+        log.exception("Fatal error during startup/run; forcing exit")
+        os._exit(1)
+    if rc != 0:
+        os._exit(rc)
+    sys.exit(rc)
