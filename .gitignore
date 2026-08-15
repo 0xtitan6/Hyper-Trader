@@ -14,3 +14,6 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 .pytest_cache/
+
+# Agent worktrees (embedded git repos, never commit)
+.claude/worktrees/

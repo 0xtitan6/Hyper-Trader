@@ -8,7 +8,7 @@ from hyperliquid.utils.error import ClientError
 
 from .alerts import Alerter
 from .config import Config
-from .errors import OrderError
+from .errors import OrderError, UnknownPrecisionError
 from .funding import FundingTracker
 from .journal import Journal
 from .market_meta import MarketMeta
@@ -88,6 +88,10 @@ MIN_NOTIONAL_SAFETY_MARGIN = 0.01
 # configured weight asked for. A skipped mirror costs one leader signal; an
 # oversized one costs real money on a $200 book.
 MAX_BUMP_RATIO = 1.5
+# How often we're willing to re-alert about the same coin being skipped for
+# unknown szDecimals. The skip itself is per-fill and a busy leader can fire
+# dozens a minute, so the alert (not the journal line) needs a throttle.
+PRECISION_ALERT_THROTTLE_SECONDS = 900.0
 
 
 class MirrorTrader:
@@ -126,6 +130,9 @@ class MirrorTrader:
         # per coin so failures back off instead of retrying every fill.
         self._leverage_set: set[str] = set()
         self._leverage_attempted: dict[str, float] = {}
+        # coin -> unix ts before which we won't re-alert about unknown
+        # szDecimals. Journal still records every skip; only the alert throttles.
+        self._precision_alert_after: dict[str, float] = {}
         # Per-leader sizing weight, refreshed every discover_leaders cycle.
         # Default 1.0 = original proportional sizing. Updated via
         # update_leader_weights() from main's refresh loop.
@@ -209,6 +216,44 @@ class MirrorTrader:
                 # the coin (else conflict-lock blocks the real originator).
                 if submitted:
                     self.positions.state.set_position_originator(intent.coin, leader)
+        except UnknownPrecisionError as e:
+            # A HIP-3 builder-dex coin (`xyz:*`) whose szDecimals never
+            # arrived — `register_hip3_dexes: perpDexs fetch failed` fired 215
+            # times in Aug 2026 and left the rounder blind. We used to guess
+            # 4dp: `xyz:MU sz=0.0143` on 2026-08-10 (xyz:MU is really 3dp) →
+            # `Order has invalid size` → _POISON_ORDER_ERRORS muted the coin
+            # for 300s → every later leader fill on it died `poison_cooldown`
+            # (5,366 Jul-Aug, 2,510 on 07-27 alone), on exactly the surface
+            # several of our leaders specialise in.
+            #
+            # Skip instead, with its own greppable reason. Cost of a skip is
+            # one signal; cost of a poisoned coin is EVERY signal on it for
+            # the next 5 minutes, on repeat. This path is pre-_submit, so no
+            # order exists and the coin stays clean — the trade resumes on
+            # its own the moment the next HIP-3 refresh registers the symbol.
+            skip_coin = fill.get("coin") or "?"
+            log.warning("[precision] skip leader=%s tid=%s: %s", leader[:10], tid, e)
+            self.journal.write(
+                "intent_skipped",
+                leader=leader,
+                tid=tid,
+                coin=skip_coin,
+                reason="unknown_sz_decimals",
+                detail=str(e),
+            )
+            # Alert too, throttled per-coin. Silence here would be dangerous:
+            # our best-evidenced leader (0x819d06c0, sharpe 0.59) is 64%
+            # xyz:SP500, so a stuck registration means we quietly stop
+            # mirroring the leader we most want to mirror. One alert per coin
+            # per 15 min is enough to notice without becoming its own storm.
+            now = time.time()
+            if now >= self._precision_alert_after.get(skip_coin, 0.0):
+                self._precision_alert_after[skip_coin] = now + PRECISION_ALERT_THROTTLE_SECONDS
+                self.alerter.alert(
+                    "warn",
+                    f"Skipping {skip_coin}: szDecimals unknown (HIP-3 registration "
+                    "incomplete). Not trading this coin until it registers.",
+                )
         except OrderError:
             raise
         except Exception:
@@ -300,8 +345,12 @@ class MirrorTrader:
             # weight/fraction did not already ask for.
             return None, "sub_min"
 
-        rounded_px = self.market_meta.round_price(px)
+        rounded_px = self.market_meta.round_price(px, coin)
         raw_sz = mirror_notional / px
+        # Deliberately NOT caught here: UnknownPrecisionError means this is a
+        # HIP-3 builder-dex coin whose szDecimals we never received, and it is
+        # handled with its own journal reason in on_leader_fill. Guessing the
+        # precision is what started the Jul-Aug 2026 poison cascade.
         rounded_sz = self.market_meta.round_size(coin, raw_sz)
         rounded_notional = rounded_sz * rounded_px
 
@@ -728,7 +777,7 @@ class MirrorTrader:
 
         slip = self.cfg.sizing.ioc_slippage_bps / 10_000.0
         slipped_px = intent.limit_px * (1 + slip if intent.is_buy else 1 - slip)
-        px = self.market_meta.round_price(slipped_px)
+        px = self.market_meta.round_price(slipped_px, intent.coin)
         log.info(
             "Submitting %s %s %.6f @ %.4f notional=$%.2f reduce_only=%s",
             "BUY" if intent.is_buy else "SELL",

@@ -241,7 +241,7 @@ class LeaderReconciler:
         is_buy = sz < 0  # close a short by buying
         bps = self.slippage_bps / 10_000
         slipped = mid * (1.0 + bps) if is_buy else mid * (1.0 - bps)
-        limit_px = self.market_meta.round_price(slipped)
+        limit_px = self.market_meta.round_price(slipped, coin)
 
         log.warning(
             "leader_reconcile: auto-closing %s reason=%s our_sz=%+.4f mid=$%.4f limit=$%.4f",

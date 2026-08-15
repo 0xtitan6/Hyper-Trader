@@ -27,6 +27,8 @@ from hyperliquid.exchange import Exchange
 from hyperliquid.info import Info
 
 from src.config import load_config
+from src.errors import UnknownPrecisionError
+from src.hl_hip3 import register_hip3_dexes
 from src.market_meta import MarketMeta
 
 
@@ -46,6 +48,14 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(args.config)
     info = Info(cfg.hyperliquid_api_url, skip_ws=True)
     market_meta = MarketMeta(info)
+    # load() was missing here: without it `_sz_decimals` is empty and EVERY
+    # coin fell back to the 4dp default, so de-risking a coin whose real
+    # szDecimals is smaller (AR is 2dp, xyz:SKHY is 2dp) produced `Order has
+    # invalid size` — i.e. the one lever we use to prevent a liquidation
+    # silently did nothing. register_hip3_dexes is needed for the same reason
+    # on the `xyz:*` surface: MarketMeta.load() only sees the original dex.
+    market_meta.load()
+    register_hip3_dexes(info, market_meta=market_meta)
 
     # current position
     us = info.user_state(cfg.account_address)
@@ -64,7 +74,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     close_sz = abs(sz) * args.fraction
-    close_sz = market_meta.round_size(args.coin, close_sz)
+    try:
+        close_sz = market_meta.round_size(args.coin, close_sz)
+    except UnknownPrecisionError as e:
+        # Fail loud rather than guess: a wrong-precision order is rejected by
+        # HL anyway, so guessing would leave the operator believing the
+        # position was flattened when it wasn't.
+        print(f"derisk: {e}", file=sys.stderr)
+        print("derisk: HIP-3 registration incomplete — flatten manually in the UI", file=sys.stderr)
+        return 5
     if close_sz <= 0:
         print(f"derisk: rounded close size is 0 for {args.coin}")
         return 0
@@ -76,7 +94,7 @@ def main(argv: list[str] | None = None) -> int:
     is_buy = sz < 0  # close a short by buying
     bps = args.slippage_bps / 10_000
     slipped = mid * (1.0 + bps) if is_buy else mid * (1.0 - bps)
-    limit_px = market_meta.round_price(slipped)
+    limit_px = market_meta.round_price(slipped, args.coin)
 
     action = "BUY" if is_buy else "SELL"
     print(

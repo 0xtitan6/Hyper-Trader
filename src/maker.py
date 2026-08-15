@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any
 
-from .errors import OrderError
+from .errors import OrderError, UnknownPrecisionError
 from .journal import Journal
 from .market_meta import MarketMeta
 from .protocols import ExchangeProto, InfoProto
@@ -264,8 +264,8 @@ class OutcomeMaker:
         skew = (position_pct * self.cfg.inventory_skew_bps_at_full / 10_000.0) * mid
         proposed_bid = best_bid + (10**-5) * self.cfg.quote_offset_ticks - skew
         proposed_ask = best_ask - (10**-5) * self.cfg.quote_offset_ticks - skew
-        bid_px = self.market_meta.round_price(proposed_bid)
-        ask_px = self.market_meta.round_price(proposed_ask)
+        bid_px = self.market_meta.round_price(proposed_bid, self.cfg.coin)
+        ask_px = self.market_meta.round_price(proposed_ask, self.cfg.coin)
 
         if bid_px >= ask_px:
             self.journal.write(
@@ -338,7 +338,16 @@ class OutcomeMaker:
     def _place(self, side: str, px: float) -> None:
         is_buy = side == "B"
         sz = self.cfg.quote_size_shares
-        sz_rounded = self.market_meta.round_size(self.cfg.coin, sz)
+        try:
+            sz_rounded = self.market_meta.round_size(self.cfg.coin, sz)
+        except UnknownPrecisionError as e:
+            # Builder-dex coin with unknown szDecimals — quoting it would get
+            # the coin poisoned (see src/market_meta.py). Abstain instead.
+            log.warning("maker: abstain on %s: %s", self.cfg.coin, e)
+            self.journal.write(
+                "maker_skip", coin=self.cfg.coin, reason="unknown_sz_decimals", detail=str(e)
+            )
+            return
         if sz_rounded <= 0:
             self.journal.write("maker_skip", coin=self.cfg.coin, reason="zero_sz_after_round")
             return
