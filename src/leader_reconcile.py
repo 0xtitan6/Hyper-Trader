@@ -165,22 +165,72 @@ class LeaderReconciler:
                 log.exception("leader_reconcile: unexpected fetch error for %s", addr[:10])
                 continue
             book: dict[str, float] = {}
-            for ap in us.get("assetPositions", []) or []:
-                pos = ap.get("position") if isinstance(ap, dict) else None
-                if not isinstance(pos, dict):
-                    continue
-                coin = pos.get("coin")
-                if not coin:
-                    continue
-                try:
-                    sz = float(pos.get("szi", 0))
-                except (TypeError, ValueError):
-                    continue
-                if sz != 0:
-                    book[coin] = sz
+            self._ingest_positions(us, book)
+            # HIP-3 builder dexes are separate clearinghouses — `user_state`
+            # never returns them. Without this the leader's entire xyz book is
+            # invisible, EVERY xyz mirror we hold classifies as `orphan`, and
+            # auto-close fires on all of them. Observed 2026-08-15: six
+            # simultaneous "Leader exit detected ... orphan" on live positions
+            # the leader still held. The only reason our xyz book survived is
+            # that `_fetch_mid` has no xyz mid and the close failed — an
+            # accident, not a safeguard. Fixing the mid without this would have
+            # force-closed the whole surface.
+            dex_ok = self._ingest_hip3_positions(addr, book)
             out[addr] = book
+            # A dex we could not read means this leader's book is INCOMPLETE.
+            # Recording it as complete would mark live mirrors as orphans, so
+            # drop the leader to UNKNOWN for this cycle instead.
+            if not dex_ok:
+                log.warning(
+                    "leader_reconcile: incomplete HIP-3 book for %s; "
+                    "treating as UNKNOWN this cycle", addr[:10],
+                )
+                out.pop(addr, None)
+                continue
             any_success = True
         return out if any_success else None
+
+    @staticmethod
+    def _ingest_positions(state: dict, book: dict[str, float]) -> None:
+        for ap in (state or {}).get("assetPositions", []) or []:
+            pos = ap.get("position") if isinstance(ap, dict) else None
+            if not isinstance(pos, dict):
+                continue
+            coin = pos.get("coin")
+            if not coin:
+                continue
+            try:
+                sz = float(pos.get("szi", 0))
+            except (TypeError, ValueError):
+                continue
+            if sz != 0:
+                book[coin] = sz
+
+    def _ingest_hip3_positions(self, addr: str, book: dict[str, float]) -> bool:
+        """Add the leader's builder-dex positions. False if any dex was unreadable."""
+        try:
+            dexes = self.info.post("/info", {"type": "perpDexs"})
+        except Exception:
+            log.warning("leader_reconcile: perpDexs fetch failed for %s", addr[:10])
+            return False
+        if dexes is None:
+            return False
+        ok = True
+        for d in dexes:
+            if not isinstance(d, dict) or not d.get("name"):
+                continue
+            name = d["name"]
+            try:
+                st = self.info.post(
+                    "/info",
+                    {"type": "clearinghouseState", "user": addr, "dex": name},
+                )
+            except Exception:
+                log.warning("leader_reconcile: dex=%s state failed for %s", name, addr[:10])
+                ok = False
+                continue
+            self._ingest_positions(st or {}, book)
+        return ok
 
     def _on_stale(self, coin: str, reason: str) -> None:
         count = self._stale_counts.get(coin, 0) + 1

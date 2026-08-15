@@ -407,3 +407,98 @@ def test_reset_debounce_single_coin(state, journal):
     assert set(r._stale_counts) == {"BTC", "ETH"}
     r.reset_debounce("BTC")
     assert set(r._stale_counts) == {"ETH"}
+
+
+# --- HIP-3 leader books (incident 2026-08-15 14:34) -------------------------
+# `user_state` returns BASE-dex positions only, so a leader's entire xyz book
+# was invisible and every xyz mirror classified as `orphan` -- six simultaneous
+# "Leader exit detected ... orphan" on positions the leader still held. The
+# only reason the book survived is that _fetch_mid has no xyz mid, so the
+# auto-close failed. That is an accident, not a safeguard: fixing the mid
+# without this would have force-closed the whole surface.
+
+
+def _hip3_reconciler(state, journal, base_book, dex_books, *, dexes=("xyz",), fail_dex=()):
+    info = MagicMock()
+    info.user_state.return_value = {
+        "assetPositions": [
+            {"position": {"coin": c, "szi": str(s)}} for c, s in base_book.items()
+        ]
+    }
+
+    def _post(_path, payload):
+        t = payload.get("type")
+        if t == "perpDexs":
+            return [{"name": d} for d in dexes]
+        if t == "clearinghouseState":
+            d = payload.get("dex")
+            if d in fail_dex:
+                raise RuntimeError(f"dex {d} down")
+            return {
+                "assetPositions": [
+                    {"position": {"coin": c, "szi": str(s)}}
+                    for c, s in dex_books.get(d, {}).items()
+                ]
+            }
+        return {}
+
+    info.post.side_effect = _post
+    return LeaderReconciler(
+        info=info, state=state, journal=journal, alerter=MagicMock(),
+        exchange=None, market_meta=None, auto_close=False,
+        debounce_cycles=2, slippage_bps=50.0, manual_holdings=None,
+    )
+
+
+def test_leader_hip3_position_is_not_an_orphan(state, journal):
+    """The regression: leader still holds xyz:SKHX, so our mirror is OK."""
+    state.update_position("xyz:SKHX", 0.02, 1000.6)
+    state.set_position_originator("xyz:SKHX", "0xlead")
+    lr = _hip3_reconciler(state, journal, {"BTC": 1.0}, {"xyz": {"xyz:SKHX": 0.5}})
+    assert lr.reconcile(["0xlead"]).get("xyz:SKHX") == STATUS_OK
+
+
+def test_unreadable_dex_skips_the_whole_cycle(state, journal):
+    """Sole leader unreadable -> skip entirely. Even safer than UNKNOWN: the
+    position is never classified, so nothing can auto-close it."""
+    state.update_position("xyz:SKHX", 0.02, 1000.6)
+    state.set_position_originator("xyz:SKHX", "0xlead")
+    lr = _hip3_reconciler(state, journal, {"BTC": 1.0}, {}, fail_dex=("xyz",))
+    out = lr.reconcile(["0xlead"])
+    assert out == {}  # cycle skipped
+    assert out.get("xyz:SKHX") != STATUS_ORPHAN
+
+
+def test_unreadable_dex_is_unknown_when_another_leader_succeeds(state, journal):
+    """With a readable leader present the cycle proceeds, so the leader whose
+    dex failed must land on UNKNOWN -- never ORPHAN, which would auto-close."""
+    state.update_position("xyz:SKHX", 0.02, 1000.6)
+    state.set_position_originator("xyz:SKHX", "0xbad")
+    info = MagicMock()
+    info.user_state.return_value = {"assetPositions": []}
+
+    def _post(_path, payload):
+        t = payload.get("type")
+        if t == "perpDexs":
+            return [{"name": "xyz"}]
+        if t == "clearinghouseState":
+            if payload.get("user") == "0xbad":
+                raise RuntimeError("dex down for this leader")
+            return {"assetPositions": []}
+        return {}
+
+    info.post.side_effect = _post
+    lr = LeaderReconciler(
+        info=info, state=state, journal=journal, alerter=MagicMock(),
+        exchange=None, market_meta=None, auto_close=False,
+        debounce_cycles=2, slippage_bps=50.0, manual_holdings=None,
+    )
+    assert lr.reconcile(["0xbad", "0xgood"]).get("xyz:SKHX") == STATUS_UNKNOWN
+
+
+def test_genuinely_closed_hip3_position_still_detected(state, journal):
+    """Fail-safe must not become never-close: leader flat on a readable dex."""
+    state.update_position("xyz:SKHX", 0.02, 1000.6)
+    state.set_position_originator("xyz:SKHX", "0xlead")
+    lr = _hip3_reconciler(state, journal, {"BTC": 1.0}, {"xyz": {}})
+    assert lr.reconcile(["0xlead"]).get("xyz:SKHX") == STATUS_CLOSED
