@@ -99,7 +99,24 @@ discovery:
     # 2026-07-21: edge evaporated in one day — 30d net flipped +$20.69 → -$2.33,
     # sharpe +0.10 → -0.00, 56% → 50% hit (coin flip), maxDD $29.51. Now a LOSER
     # (net<0). Reverse yesterday's concentration bump: 1.5 → 1.0.
-    "0x6cd520c1a07c9b53b33d62d04d3c2a3175161968": 1.0
+    # 2026-08-15: LOSER again, and the "it's only the xyz surface" defence is now
+    # dead. 30d @ $216 proxy: 1899 trades / 757 closes, 38% hit, net -$9.02,
+    # sharpe -0.10, maxDD $10.28 (> net). Surface split: crypto -$1.77
+    # (GRASS -8.61 alone), xyz -$7.26 — BOTH negative. The earlier read that
+    # kept this slot alive (losses confined to xyz, crypto side +$30) no longer
+    # holds on the current window, so there is nothing left to carve out.
+    # Not a measurement artifact: clearinghouseState is clean — $37.6k equity,
+    # +$710 unrealized (+1.9% of equity), 3-10x lev, last fill 4h ago. This is a
+    # healthy wallet with genuinely negative copy-edge, not a bag-holder whose
+    # closedPnl flatters it. Across 5 measurements it has never held positive
+    # risk-adjusted edge; it oscillates around zero and pays fees to do it.
+    # 1.0 -> 0.5 (the -0.5/run bound). Walking it down rather than dropping it:
+    # auto-discovery is currently surfacing nobody (min_leader_equity_usd 500
+    # rejects ~all of the leaderboard), so dropping this leaves a single-leader
+    # book. Halves the bleed, keeps the slot measurable. Next negative run: drop.
+    # Mute check: fixed_usd $30 * 0.5 = $15 clip, clears min_per_trade_usd $10
+    # after floor-rounding — this is a real cut, NOT a silent mute.
+    "0x6cd520c1a07c9b53b33d62d04d3c2a3175161968": 0.5
     # 2026-08-14: concentrate on the sharpe leader (0.59 vs 0.26). Auto-weighting
     # had it at 1.36; 1.5 is a modest deliberate bump, not a new regime.
     # 2026-08-15: 1.5 -> 2.0. Now that it actually executes (it placed ZERO
