@@ -213,7 +213,12 @@ def test_pipeline_with_live_order_submission(cfg, market_meta, tmp_path: Path):
     args, kwargs = exchange.order.call_args
     assert args[0] == "#11"
     assert args[1] is True  # buy
-    # leader notional = 50; mirror notional = 5; sz = 5 / 0.5 = 10
-    assert abs(args[2] - 10.0) < 1e-9
+    # leader notional = 50; mirror notional = 5; sz = 5 / 0.5 = 10 shares.
+    # That lands EXACTLY on min_per_trade_usd ($5), which HL may value below
+    # its own minimum using its reference price (30d: 199 rejects, all at
+    # exactly $10.00 intent notional). Since 2026-08-14 the sub-minimum rescue
+    # rounds up one szDecimals step so we clear the floor with margin:
+    # target = 5 * 1.01 = $5.05 → ceil(5.05 / 0.50) = 11 shares = $5.50.
+    assert abs(args[2] - 11.0) < 1e-9
     assert kwargs["order_type"] == {"limit": {"tif": "Ioc"}}
     assert kwargs["reduce_only"] is False  # no opposing position
