@@ -14,7 +14,46 @@ is wrong even when the tests are green.
 
 ---
 
-## READY — P1: leader-drop leaves positions orphaned forever
+## READY — P0: the solvency gate reads base-dex equity only (INV 1, 4th time)
+
+**Problem.** `src/leaders._perp_equity_usd` calls `info.user_state()`, which
+returns BASE-dex equity only. A leader whose collateral sits on a HIP-3 dex
+reads **$0** and is rejected as insolvent. Verified 2026-08-15:
+
+```
+0x819d06c0   base $0.00  ->  $514 on xyz     <- our PINNED incumbent
+0x9551e7d4   base $0.00  ->  $8,104 on xyz   <- the wallet the gate was built for
+0x810b41bd   base $0.00  ->  $62,955 on xyz
+0x2649bb08   base $0.00  ->  $15,109 on xyz
+```
+
+18–21 of 60 candidates are rejected this way. Our own pinned leader would be
+rejected if it were ever unpinned — `config.yaml` warns about that, and this is
+the mechanism.
+
+**This invalidates two earlier claims** made to the PM, both from the same
+misread: that `0x9551e7d4` was a "$0 equity dead slot" (it holds $8,104), and
+that "44 of the top 60 have zero perp equity" (unverified — likely a base-dex
+artifact). Do not cite either as established.
+
+The gate is not useless: `0x166866a2` is genuinely empty on every dex despite
+1,375 recent fills. False positives are the problem, not the idea.
+
+**Acceptance criteria**
+1. `_perp_equity_usd` sums/checks equity **per dex** via `perpDexs` +
+   `clearinghouseState{user, dex}`.
+2. Per INV 2, collateral is per-clearinghouse — the gate passes if **ANY** dex
+   clears the threshold. Never compare a sum-across-dexes to the threshold.
+3. INV 4: an unreadable dex leaves the candidate UNKNOWN → do not reject.
+   Currently `None` already means "don't judge"; preserve that.
+4. Re-run the 60-wallet screen and report how the selected set changes.
+5. Tests: base-only equity, dex-only equity, both, unreadable dex, genuinely
+   empty everywhere.
+6. Full suite green (currently 639).
+
+---
+
+## DONE 2026-08-15 — P1: leader-drop leaves positions orphaned forever
 
 **Problem.** `leader_exit_auto_close` fires only when a *leader exits their
 position*. Removing a leader from `config.yaml` leaves everything they opened
@@ -38,7 +77,7 @@ closed by hand on 2026-08-15.
 
 ---
 
-## READY — P2: `discovery.min_trades: 50` biases us toward uncopyable leaders
+## DONE 2026-08-15 — P2: `discovery.min_trades: 50` analysis (verdict: leave it at 50; not the binding constraint)
 
 **Problem.** The filter selects for trade *frequency*, which is precisely the
 property that makes a wallet unprofitable to copy at our base fee tier (4.5 bps
@@ -101,3 +140,5 @@ decision before it moves to READY.
 - reconcile zeroing HIP-3 positions (27 in one day; disabled the per-dex cap)
 - unified-margin free collateral (base `withdrawable` read $0 vs $151.78 real)
 - `leader_reconcile` HIP-3 blindness (tried to auto-close 6 live positions)
+- dropped-leader orphan detection (P1, detect-only)
+- min_trades analysis (P2 — verdict: NOT the binding constraint, leave at 50)
