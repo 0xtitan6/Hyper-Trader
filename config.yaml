@@ -34,6 +34,20 @@ discovery:
   # is ~60% outcome flow per 2026-05-06 probe).
   score_perp_only: true
   min_perp_fraction: 0.5
+  # 2026-08-15: solvency gate. A leaderboard rank is 30d HISTORY — a trader who
+  # withdrew or blew up keeps the rank while trading nothing, and we burn one of
+  # our ≤9 WS slots watching a corpse. 0x9551e7d4 held a live slot for a full day
+  # at $0 equity / $0 notional / 0 positions / last fill 19.4h old; it passed
+  # every check because 42% of its flow is xyz: perps, so min_perp_fraction was
+  # satisfied while the wallet was empty. A sweep of the top-60 leaderboard found
+  # 44 of them at ZERO perp equity, so this is the dominant failure mode.
+  # WARNING: this gate applies to AUTO-DISCOVERY ONLY. Our best leader,
+  # 0x819d06c0, holds just $30 of perp equity and WOULD be rejected by this —
+  # it survives solely because it is pinned in always_follow, which bypasses
+  # every filter. If anyone ever unpins it, this gate will silently drop the
+  # best-evidenced leader we have (sharpe 0.59, 80% hit). Unpin only together
+  # with lowering this number.
+  min_leader_equity_usd: 500.0
   # Operator override: RWA-heavy leaders that fail the perp-bias filter
   # (because their xyz:* tokenized-stock activity is dwarfed by their HIP-4
   # outcome activity in raw fill counts) but who passed leader_score on their

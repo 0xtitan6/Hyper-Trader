@@ -1,4 +1,5 @@
 import logging
+from typing import Any
 
 from .config import DiscoveryConfig
 from .leader_score import load_metrics, meets_quality
@@ -6,6 +7,21 @@ from .liquidiction import LiquidictionClient, Trader
 from .protocols import InfoProto
 
 log = logging.getLogger(__name__)
+
+
+def _perp_equity_usd(info: Any, address: str) -> float | None:
+    """A leader's perp account value, or None if we couldn't read it.
+
+    Returns None (not 0.0) on any failure so a flaky `info` call can never
+    silently disqualify a good leader — unknown means "don't judge", the same
+    fail-open stance the margin guard takes.
+    """
+    try:
+        state = info.user_state(address) or {}
+        return float((state.get("marginSummary") or {}).get("accountValue", 0) or 0)
+    except Exception:  # noqa: BLE001 — a probe failure must not break discovery
+        log.warning("discover_leaders: equity probe failed for %s", address[:12], exc_info=True)
+        return None
 
 
 def discover_leaders(
@@ -50,6 +66,23 @@ def discover_leaders(
             )
             if metrics is None:
                 rejected_for_score.append((t, "metrics_unavailable"))
+                continue
+            # Solvency gate (2026-08-15). A leaderboard PnL says nothing about
+            # whether the wallet still HAS money — 30d rank is history, and a
+            # trader who withdrew or blew up keeps their rank while trading
+            # nothing. 0x9551e7d4 held a live slot for a full day at $0 equity,
+            # $0 notional, 0 positions, last fill 19.4h old. A research sweep of
+            # the top 60 found 44 of them at zero perp equity, so this is the
+            # dominant failure mode, not one bad wallet.
+            #
+            # Checked before meets_quality because it is the cheaper, more
+            # decisive test: no equity means no future fills to mirror, whatever
+            # the historical metrics say.
+            equity = _perp_equity_usd(info, t.address)
+            if equity is not None and equity < cfg.min_leader_equity_usd:
+                rejected_for_score.append(
+                    (t, f"equity=${equity:.0f} < ${cfg.min_leader_equity_usd:.0f}")
+                )
                 continue
             ok, reason = meets_quality(
                 metrics,

@@ -191,3 +191,79 @@ def test_explicit_weight_applies_to_always_follow_synthetic():
     assert len(leaders) == 1
     assert leaders[0].weight == 3.0
     assert leaders[0].rank == -1  # was a synthetic stub
+
+
+# --- solvency gate (2026-08-15) ---------------------------------------------
+# 0x9551e7d4 held a live leader slot for a day at $0 equity / 0 positions /
+# last fill 19.4h old. It passed every quality check because 42% of its flow is
+# xyz: perps — the filter measured perp FRACTION but never whether the wallet
+# had any money. A sweep of the top 60 found 44 at zero perp equity.
+
+def _info_with_equity(equity_by_addr: dict, fills=None):
+    """An info double whose user_state reports per-address perp equity."""
+    info = MagicMock()
+    info.user_state.side_effect = lambda a: {
+        "marginSummary": {"accountValue": str(equity_by_addr.get(a.lower(), 0.0))}
+    }
+    info.user_fills_by_time.return_value = fills if fills is not None else []
+    return info
+
+
+def test_zero_equity_leader_is_rejected(monkeypatch):
+    from src import leaders as leaders_mod
+
+    monkeypatch.setattr(
+        leaders_mod, "load_metrics", lambda *a, **k: MagicMock(realized_pnl_sharpe=1.0)
+    )
+    monkeypatch.setattr(leaders_mod, "meets_quality", lambda *a, **k: (True, ""))
+    client = MagicMock()
+    client.top_traders.return_value = [
+        Trader(address="0xdead", rank=1, pnl=9999.0, trades=999, volume=1e6),
+    ]
+    cfg = DiscoveryConfig(
+        period="7d", top_n=2, min_trades=1, min_volume_usd=0, min_pnl_usd=0,
+        refresh_seconds=600, use_quality_filter=True, min_leader_equity_usd=500.0,
+    )
+    out = discover_leaders(client, cfg, info=_info_with_equity({"0xdead": 0.0}))
+    assert out == []
+
+
+def test_funded_leader_passes_the_solvency_gate(monkeypatch):
+    from src import leaders as leaders_mod
+
+    monkeypatch.setattr(
+        leaders_mod, "load_metrics", lambda *a, **k: MagicMock(realized_pnl_sharpe=1.0)
+    )
+    monkeypatch.setattr(leaders_mod, "meets_quality", lambda *a, **k: (True, ""))
+    client = MagicMock()
+    client.top_traders.return_value = [
+        Trader(address="0xrich", rank=1, pnl=9999.0, trades=999, volume=1e6),
+    ]
+    cfg = DiscoveryConfig(
+        period="7d", top_n=2, min_trades=1, min_volume_usd=0, min_pnl_usd=0,
+        refresh_seconds=600, use_quality_filter=True, min_leader_equity_usd=500.0,
+    )
+    out = discover_leaders(client, cfg, info=_info_with_equity({"0xrich": 25_000.0}))
+    assert [t.address for t in out] == ["0xrich"]
+
+
+def test_equity_probe_failure_does_not_disqualify(monkeypatch):
+    """Fail OPEN: an info blip must never silently drop a good leader."""
+    from src import leaders as leaders_mod
+
+    monkeypatch.setattr(
+        leaders_mod, "load_metrics", lambda *a, **k: MagicMock(realized_pnl_sharpe=1.0)
+    )
+    monkeypatch.setattr(leaders_mod, "meets_quality", lambda *a, **k: (True, ""))
+    client = MagicMock()
+    client.top_traders.return_value = [
+        Trader(address="0xflaky", rank=1, pnl=9999.0, trades=999, volume=1e6),
+    ]
+    info = MagicMock()
+    info.user_state.side_effect = RuntimeError("503")
+    cfg = DiscoveryConfig(
+        period="7d", top_n=2, min_trades=1, min_volume_usd=0, min_pnl_usd=0,
+        refresh_seconds=600, use_quality_filter=True, min_leader_equity_usd=500.0,
+    )
+    out = discover_leaders(client, cfg, info=info)
+    assert [t.address for t in out] == ["0xflaky"]

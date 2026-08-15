@@ -32,6 +32,13 @@ class DiscoveryConfig:
     # to be ≥ N% perp. Both default to 0/False to preserve old behavior.
     score_perp_only: bool = False
     min_perp_fraction: float = 0.0
+    # Solvency gate: reject a candidate whose perp account value is below this.
+    # A leaderboard rank is 30d HISTORY — a trader who withdrew or blew up keeps
+    # the rank while trading nothing, and we hold a live WS slot on a corpse.
+    # 0x9551e7d4 did exactly that for a day ($0 equity, 0 positions, last fill
+    # 19.4h old), and a sweep of the top 60 found 44 at zero perp equity.
+    # Default 0.0 preserves old behaviour; config.yaml sets the real value.
+    min_leader_equity_usd: float = 0.0
     # Operator override: hex addresses to follow regardless of leaderboard
     # rank or quality filter. Bypasses every coarse + score filter. Useful
     # for specialists auto-discovery rejects — e.g. RWA-heavy traders whose
