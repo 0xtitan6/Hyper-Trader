@@ -432,7 +432,7 @@ def test_configurable_slippage_50bps(
     px = exchange.order.call_args.args[3]
     leader_px = float(outcome_fill["px"])
     # 0.5% above leader px, then 5-sig-fig rounding
-    expected = market_meta.round_price(leader_px * 1.005)
+    expected = market_meta.round_price(leader_px * 1.005, outcome_fill["coin"])
     assert abs(px - expected) < 1e-9
 
 
@@ -446,7 +446,7 @@ def test_configurable_slippage_zero(
     px = exchange.order.call_args.args[3]
     leader_px = float(outcome_fill["px"])
     # zero slippage → submitted px equals (rounded) leader px
-    assert abs(px - market_meta.round_price(leader_px)) < 1e-9
+    assert abs(px - market_meta.round_price(leader_px, outcome_fill["coin"])) < 1e-9
 
 
 def test_reduce_only_on_opposing_sell_into_long(
@@ -1081,3 +1081,140 @@ def test_accepted_order_reserves_in_flight(
     mt.on_leader_fill("0xleader", outcome_fill)
     assert len(mt._in_flight) == 1
     positions.state.set_position_originator.assert_called_once()
+
+
+# --- HIP-3 unknown-precision guard (2026-07/08 poison cascade) -------------
+#
+# Head of the chain: register_hip3_dexes failed 215x in Aug 2026, so xyz:*
+# had no szDecimals; we guessed 4dp, submitted `xyz:MU sz=0.0143` on 08-10,
+# HL answered `Order has invalid size`, _POISON_ORDER_ERRORS muted the coin
+# for 300s and every later leader fill on it died `poison_cooldown` —
+# 5,366 of them Jul-Aug. Now we skip the trade and say why.
+
+
+def _xyz_fill(coin="xyz:MU", px="140.0", sz="10"):
+    return {"tid": 2001, "coin": coin, "px": px, "sz": sz, "side": "B", "time": 1714000000000}
+
+
+def _perp_cfg(cfg):
+    cfg = _override_risk(cfg, allowed_market_types=["outcome", "perp"], dry_run=False)
+    return _override_sizing(cfg, min_per_trade_usd=1.0, max_per_trade_usd=1000.0)
+
+
+def test_unknown_xyz_szdecimals_skips_instead_of_poisoning(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    cfg2 = _perp_cfg(cfg)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", _xyz_fill())
+    exchange.order.assert_not_called()
+
+
+def test_unknown_xyz_szdecimals_journals_diagnosable_reason(
+    cfg, positions, alerter, exchange, tmp_path
+):
+    import json
+
+    from src.journal import Journal
+    from src.market_meta import MarketMeta
+
+    info = MagicMock()
+    info.meta.return_value = {"universe": [{"name": "BTC", "szDecimals": 5}]}
+    info.spot_meta.return_value = {"universe": [], "tokens": []}
+    mm = MarketMeta(info)
+    mm.load()
+
+    j = Journal(str(tmp_path / "j.jsonl"))
+    cfg2 = _perp_cfg(cfg)
+    mt = MirrorTrader(cfg2, exchange, positions, j, alerter, mm)
+    mt.on_leader_fill("0xleader", _xyz_fill())
+
+    events = [json.loads(line) for line in (tmp_path / "j.jsonl").read_text().splitlines()]
+    skips = [e for e in events if e.get("event") == "intent_skipped"]
+    assert len(skips) == 1
+    # Distinct from the generic "filter" reason — greppable in the journal
+    assert skips[0]["reason"] == "unknown_sz_decimals"
+    assert skips[0]["coin"] == "xyz:MU"
+    assert "xyz:MU" in skips[0]["detail"]
+    exchange.order.assert_not_called()
+
+
+def test_registered_xyz_szdecimals_submits_at_3dp(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Once HIP-3 registration lands, the SAME fill trades — at 3dp, the real
+    xyz:MU precision. This is the whole point: unblock the surface, correctly."""
+    market_meta.register_dex_assets([{"name": "xyz:MU", "szDecimals": 3}])
+    cfg2 = _perp_cfg(cfg)
+    cfg2 = _override_sizing(cfg2, mode="fixed", fixed_usd=14.0, ioc_slippage_bps=0)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", _xyz_fill(px="1000.0"))
+    exchange.order.assert_called_once()
+    coin, _is_buy, sz, _px = exchange.order.call_args.args[:4]
+    assert coin == "xyz:MU"
+    # $14 / $1000 = 0.014 exactly at 3dp (the old 4dp guess produced 0.0140)
+    assert sz == 0.014
+    assert round(sz % 0.001, 9) == 0  # never finer than szDecimals
+
+
+def test_unknown_xyz_skip_does_not_arm_poison_cooldown(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Skipping must leave the coin CLEAN, so it trades the instant the next
+    HIP-3 refresh registers it — no 300s dead zone."""
+    cfg2 = _perp_cfg(cfg)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", _xyz_fill())
+    assert mt._poison_until == {}
+    market_meta.register_dex_assets([{"name": "xyz:MU", "szDecimals": 3}])
+    mt.on_leader_fill("0xleader", {**_xyz_fill(), "tid": 2002})
+    exchange.order.assert_called_once()
+
+
+def test_unknown_xyz_skip_claims_nothing_and_raises_no_alert(
+    cfg, positions, journal, exchange, market_meta
+):
+    """The skip is a clean no-op: no live order, so the coin must not claim an
+    originator slot (that would block the real originator via the conflict
+    lock), and it must not fire the generic pipeline-exception 'error' alert —
+    this is an expected, handled condition, not a crash.
+
+    It DOES fire one throttled 'warn'. That is deliberate: 0x819d06c0 (our
+    best-evidenced leader) is 64% xyz:SP500, so a stuck registration silently
+    stops us mirroring the leader we most want. Throttling is asserted
+    separately in test_precision_alert_is_throttled_per_coin.
+    """
+    alerter = MagicMock()
+    cfg2 = _perp_cfg(cfg)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", _xyz_fill())
+    exchange.order.assert_not_called()
+    positions.state.set_position_originator.assert_not_called()
+    assert alerter.alert.call_count == 1
+    assert alerter.alert.call_args.args[0] == "warn"
+    assert "szDecimals unknown" in alerter.alert.call_args.args[1]
+
+
+def test_precision_alert_is_throttled_per_coin(
+    cfg, positions, journal, exchange, market_meta
+):
+    """A stuck HIP-3 registration means EVERY fill on that coin skips. Our best
+    leader fires ~13 fills/day on xyz:SP500 and perpDexs failed 215x in August,
+    so an alert per fill would bury real risk alerts. One per coin per window."""
+    alerter = MagicMock()
+    cfg2 = _perp_cfg(cfg)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    for tid in range(2100, 2110):
+        mt.on_leader_fill("0xleader", {**_xyz_fill(), "tid": tid})
+    assert alerter.alert.call_count == 1  # 10 skips, 1 alert
+    exchange.order.assert_not_called()
+
+
+def test_non_dex_perp_still_trades_on_default_precision(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Scope guard: the refusal must NOT spill onto original-dex perps."""
+    cfg2 = _perp_cfg(cfg)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", {**_xyz_fill(coin="SOMENEWPERP"), "tid": 2003})
+    exchange.order.assert_called_once()

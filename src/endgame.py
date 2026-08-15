@@ -156,7 +156,7 @@ class EndgameRunner:
             log.info("endgame: skip %s ask=%.4f > cap=%.4f", coin, ask, max_px)
             return False
         # Round to HL's tick rule
-        limit_px = self.market_meta.round_price(ask)
+        limit_px = self.market_meta.round_price(ask, coin)
         sz = float(self.cfg.sz_per_fire)
         if self.dry_run:
             log.info(
