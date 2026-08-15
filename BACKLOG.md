@@ -14,7 +14,75 @@ is wrong even when the tests are green.
 
 ---
 
-## READY — P0: the solvency gate reads base-dex equity only (INV 1, 4th time)
+## READY — P0 (TOP): we mirror a leader's EXITS as new ENTRIES
+
+**Problem.** `_build_intent` copies the leader's fill *side* and never asks
+whether that fill OPENED or CLOSED their position. When a leader buys to cover
+a short, we buy and open a long — the exact opposite of what copying them means.
+
+Verified live 2026-08-15. Leader `0x819d06c0` covering a short in `xyz:SP500`:
+
+```
+side=B  dir=Close Short  startPosition=-3.384
+side=B  dir=Close Short  startPosition=-3.467
+side=B  dir=Close Short  startPosition=-3.521
+```
+
+We mirrored 13 of those as BUYs and ended up **long +0.035 against the leader's
+−2.801 short**. It was closed by hand at 15:56 and rebuilt itself by 18:56,
+larger. Across that leader's ~1,400 recent fills: **216 `Close Short` + 253
+`Close Long`** — roughly a third of everything we copy is a leader EXITING.
+This is a strong candidate for the xyz realized −$87.03 (INV 10 measurement).
+
+`grep -n 'dir' src/mirror.py` returns nothing: the field is never read.
+
+**Acceptance criteria**
+1. Classify every leader fill as OPEN / CLOSE / FLIP. **Derive it from
+   `startPosition` + `side` + `sz` — arithmetic, not the `dir` string** — and
+   use `dir` only as a cross-check. `startPosition` is authoritative and does
+   not depend on HL's labelling staying stable.
+2. Behaviour:
+   - OPEN → mirror as today.
+   - CLOSE → **reduce only**. If we hold nothing in that direction, SKIP with a
+     distinct journal reason (e.g. `leader_closing_we_are_flat`). Never open
+     the opposite side. This single rule is the fix.
+   - FLIP (`Short > Long`) → close ours fully, then open the new direction.
+3. Never let a CLOSE mirror increase our absolute exposure on that coin.
+4. INV 4: if `startPosition` is missing AND `dir` is absent, the fill is
+   UNKNOWN — skip it with its own reason rather than guessing. Do not fall back
+   to today's behaviour, which is the bug.
+5. Tests, each asserting order side AND `reduce_only`:
+   - leader closes a short, we are flat → **no order** (the headline regression)
+   - leader closes a short, we are long → reduce, never flip through zero
+   - leader opens a short, we are flat → mirror short
+   - leader flips short→long → close then open
+   - `startPosition` absent, `dir` present → uses dir
+   - both absent → skipped as unknown
+6. Full suite green (currently 639). Report the count.
+
+**Do NOT attempt target-position mirroring in this item** — that is the next
+item and needs a scale definition first. Keep this surgical.
+
+---
+
+## READY — P0b: mirror target POSITION, not deltas (needs shadow test)
+
+The deeper flaw behind P0. We copy *changes* when we should track *state*:
+`target = leader_position_after × scale`, `order = target − ours`. That is
+self-correcting — a missed WS fill, a rejected order or a reconcile hiccup gets
+pulled back on the next fill instead of compounding forever.
+
+**Blocked on a decision, not on code:** we size with a fixed $30 clip, not
+proportionally, so `scale` has no natural definition yet. Getting it wrong means
+fighting leaders on ENTRIES, which is worse than the current bug.
+
+Must ship behind a shadow mode that logs intended vs actual orders against live
+fills for a full session before it is allowed to trade. PM reviews the shadow
+log before it goes live.
+
+---
+
+## READY — P0c: the solvency gate reads base-dex equity only (INV 1, 4th time)
 
 **Problem.** `src/leaders._perp_equity_usd` calls `info.user_state()`, which
 returns BASE-dex equity only. A leader whose collateral sits on a HIP-3 dex
