@@ -582,3 +582,132 @@ def test_reconcile_journals_free_collateral(state, journal):
         events = [json.loads(line) for line in f if json.loads(line)["event"] == "reconcile"]
     assert events[0]["free_collateral_usd"] == 90.0
     assert events[0]["account_value_usd"] == 100.0
+
+
+# --- HIP-3 builder-dex reconcile (bug found 2026-08-15) ----------------------
+# `user_state` only ever returns BASE-dex positions. Every `xyz:*` position
+# therefore looked "missing upstream" and was zeroed on every cycle: 27
+# `zeroing xyz:SP500` in a single day. Three compounding consequences — the bot
+# believed it was flat and re-opened (SP500 stacked to 7x intended size),
+# reduce_only exits looked like opens, and the per-dex exposure cap read the
+# same zeroed state so it saw ~$0 against ~$339 of real xyz risk.
+
+
+def _post_router(spot=None, dexes=None, dex_states=None, fail=()):
+    """Route info.post by payload type, like the real /info endpoint."""
+    spot = spot if spot is not None else {"balances": []}
+    dexes = dexes if dexes is not None else [{"name": "xyz"}]
+    dex_states = dex_states or {}
+
+    def _post(_path, payload):
+        t = payload.get("type")
+        if t in fail:
+            raise RuntimeError(f"{t} endpoint down")
+        if t == "spotClearinghouseState":
+            return spot
+        if t == "perpDexs":
+            return dexes
+        if t == "clearinghouseState":
+            dex = payload.get("dex")
+            if dex in fail:
+                raise RuntimeError(f"dex {dex} down")
+            return dex_states.get(dex, {"assetPositions": []})
+        return {}
+
+    return _post
+
+
+def test_reconcile_merges_hip3_dex_positions(state, journal):
+    info = MagicMock()
+    info.user_state.return_value = {
+        "assetPositions": [{"position": {"coin": "BTC", "szi": "0.1", "entryPx": "50000"}}]
+    }
+    info.post.side_effect = _post_router(
+        dex_states={
+            "xyz": {
+                "assetPositions": [
+                    {"position": {"coin": "xyz:SP500", "szi": "0.017", "entryPx": "7780"}}
+                ]
+            }
+        }
+    )
+    pt = PositionTracker(info, "0xacc", state, journal)
+    result = pt.reconcile_with_user_state()
+    assert result["BTC"] == (0.1, 50000.0)
+    assert result["xyz:SP500"] == (0.017, 7780.0)
+
+
+def test_reconcile_does_not_zero_live_hip3_position(state, journal):
+    """The actual regression: a held xyz position must survive a cycle."""
+    state.update_position("xyz:SP500", 0.017, 7780.0)
+    info = MagicMock()
+    info.user_state.return_value = {"assetPositions": []}
+    info.post.side_effect = _post_router(
+        dex_states={
+            "xyz": {
+                "assetPositions": [
+                    {"position": {"coin": "xyz:SP500", "szi": "0.017", "entryPx": "7780"}}
+                ]
+            }
+        }
+    )
+    pt = PositionTracker(info, "0xacc", state, journal)
+    result = pt.reconcile_with_user_state()
+    assert result["xyz:SP500"] == (0.017, 7780.0)
+
+
+def test_unreachable_dex_holds_state_instead_of_zeroing(state, journal):
+    """A dex we cannot read is UNKNOWN, not empty. Zeroing on a failed fetch
+    is exactly the bug — so hold local state until it answers again."""
+    state.update_position("xyz:SP500", 0.017, 7780.0)
+    info = MagicMock()
+    info.user_state.return_value = {"assetPositions": []}
+    info.post.side_effect = _post_router(fail=("xyz",))
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    assert state.get_positions()["xyz:SP500"][0] == 0.017  # held, not zeroed
+
+
+def test_perpdexs_failure_holds_all_hip3_state(state, journal):
+    """If we can't even enumerate the dexes, hold every dex position."""
+    state.update_position("xyz:SP500", 0.017, 7780.0)
+    state.update_position("flx:BTC", 1.5, 100.0)
+    info = MagicMock()
+    info.user_state.return_value = {"assetPositions": []}
+    info.post.side_effect = _post_router(fail=("perpDexs",))
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    pos = state.get_positions()
+    assert pos["xyz:SP500"][0] == 0.017
+    assert pos["flx:BTC"][0] == 1.5
+
+
+def test_closed_hip3_position_is_still_zeroed_when_dex_is_readable(state, journal):
+    """Fail-safe must not become never-zero: a readable dex that no longer
+    reports the coin means it really is closed."""
+    state.update_position("xyz:SP500", 0.017, 7780.0)
+    info = MagicMock()
+    info.user_state.return_value = {"assetPositions": []}
+    info.post.side_effect = _post_router(dex_states={"xyz": {"assetPositions": []}})
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    assert state.get_positions()["xyz:SP500"][0] == 0.0
+
+
+def test_hip3_exposure_is_visible_to_the_per_dex_cap(state, journal):
+    """The cap reads the same state — after reconcile it must see real risk."""
+    info = MagicMock()
+    info.user_state.return_value = {"assetPositions": []}
+    info.post.side_effect = _post_router(
+        dex_states={
+            "xyz": {
+                "assetPositions": [
+                    {"position": {"coin": "xyz:SP500", "szi": "-0.05", "entryPx": "7780"}}
+                ]
+            }
+        }
+    )
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    assert abs(pt.exposure_usd_for_dex("xyz") - 389.0) < 1.0
+    assert pt.exposure_usd_for_dex("") == 0.0

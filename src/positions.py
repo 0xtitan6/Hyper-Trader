@@ -162,6 +162,69 @@ class PositionTracker:
                 ts=time.time(),
             )
 
+    def _hip3_dex_names(self) -> list[str] | None:
+        """Active HIP-3 builder-dex names, or None if we couldn't enumerate.
+
+        None is distinct from []: an empty list means "there are genuinely no
+        builder dexes", while None means "we don't know", and the caller must
+        not treat unknown as empty (that's what zeroed live positions).
+        """
+        try:
+            dexes = self.info.post("/info", {"type": "perpDexs"})
+        except Exception:
+            log.exception("reconcile: perpDexs fetch failed; holding HIP-3 state")
+            return None
+        if dexes is None:
+            log.warning("reconcile: perpDexs returned empty; holding HIP-3 state")
+            return None
+        return [d["name"] for d in dexes if isinstance(d, dict) and d.get("name")]
+
+    def _merge_hip3_positions(self, upstream: dict[str, tuple[float, float]]) -> set[str]:
+        """Merge each builder dex's positions into `upstream`.
+
+        Returns the set of dex names we could NOT read, so the caller can hold
+        (rather than zero) local positions belonging to them.
+        """
+        names = self._hip3_dex_names()
+        if names is None:
+            # Unknown which dexes exist → treat every dex we hold as unreachable.
+            return {dex_of(c) for c in self.state.get_positions() if dex_of(c)}
+        unreachable: set[str] = set()
+        for dex in names:
+            try:
+                st = (
+                    self.info.post(
+                        "/info",
+                        {
+                            "type": "clearinghouseState",
+                            "user": self.account_address,
+                            "dex": dex,
+                        },
+                    )
+                    or {}
+                )
+            except Exception:
+                log.exception("reconcile: clearinghouseState failed for dex=%s; holding", dex)
+                unreachable.add(dex)
+                continue
+            for ap in st.get("assetPositions", []) or []:
+                pos = ap.get("position") if isinstance(ap, dict) else None
+                if not isinstance(pos, dict):
+                    continue
+                coin = pos.get("coin")
+                if not coin:
+                    continue
+                try:
+                    szi = float(pos.get("szi", 0))
+                    entry_px = float(pos.get("entryPx", 0) or 0)
+                except (TypeError, ValueError):
+                    log.warning("reconcile: malformed HIP-3 position %s", pos)
+                    continue
+                # HL already returns these dex-prefixed ("xyz:SP500"), which is
+                # the same key leader fills carry. Prefix defensively if not.
+                upstream[coin if ":" in coin else f"{dex}:{coin}"] = (szi, entry_px)
+        return unreachable
+
     def reconcile_with_user_state(self) -> dict[str, tuple[float, float]]:
         """Overwrite local position state with HL's authoritative state.
 
@@ -235,6 +298,19 @@ class PositionTracker:
             trade_coin = "#" + coin[1:]
             upstream[trade_coin] = (total, avg_px)
 
+        # HIP-3 builder dexes are SEPARATE clearinghouses. `user_state` above
+        # only ever returns base-dex positions, so without this every `xyz:*`
+        # position looked "missing upstream" and was zeroed on every cycle.
+        # Found 2026-08-15: 27 `zeroing xyz:SP500` in one day, with three
+        # compounding consequences —
+        #   1. sizing: the bot believed it was flat and re-opened on the next
+        #      leader signal, stacking SP500 to 7x the intended size;
+        #   2. reduce_only: exits looked like opens against a flat book;
+        #   3. the per-dex exposure cap read the same zeroed state, so it saw
+        #      ~$0 of xyz risk against ~$339 real — the cap bounded nothing.
+        # Same bug class as the outcome-leg special case above.
+        unreachable_dexes = self._merge_hip3_positions(upstream)
+
         local = self.state.get_positions()
         # Filter out already-closed positions (sz=0) from comparison/journal
         # entries — they are historical artifacts, not phantom positions
@@ -243,6 +319,17 @@ class PositionTracker:
         # happens (caught by supervisor 2026-05-09: 9 phantoms re-listed every
         # 5 min for 24+ hours straight).
         active_local = {coin: pos for coin, pos in local.items() if pos[0] != 0}
+        # A dex we could not read is UNKNOWN, not empty. Zeroing on a failed
+        # fetch is precisely the bug being fixed, so hold local state for those
+        # coins until the dex answers again.
+        if unreachable_dexes:
+            held = {c for c in active_local if dex_of(c) in unreachable_dexes}
+            if held:
+                log.warning(
+                    "reconcile: holding %d position(s) on unreachable dex(es) %s: %s",
+                    len(held), sorted(unreachable_dexes), sorted(held),
+                )
+            active_local = {c: p for c, p in active_local.items() if c not in held}
         with self._lock:
             for coin, (sz, avg_px) in upstream.items():
                 cur = active_local.get(coin)
