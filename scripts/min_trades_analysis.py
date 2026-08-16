@@ -54,6 +54,7 @@ from hyperliquid.info import Info
 from src.config import Config, load_config
 from src.copy_econ import DEFAULT_TAKER_BPS, CopyEcon, compute_copy_econ, passes_fee_tier
 from src.leader_score import LeaderMetrics, _compute_metrics, meets_quality
+from src.leaders import _perp_equity_usd, hip3_dex_names
 from src.liquidiction import LiquidictionClient, Trader
 
 DEFAULT_MIN_TRADES = (20, 30, 50)
@@ -92,29 +93,39 @@ def _fetch_fills(info: Info, address: str, lookback_hours: float) -> list[dict[s
     return out if isinstance(out, list) else None
 
 
-def _fetch_account(info: Info, address: str) -> tuple[float | None, float | None, float | None]:
-    """(equity, unrealized_pnl, position_notional) for a leader's BASE perp book.
+def _fetch_account(
+    info: Info, address: str, min_equity_usd: float, dex_names: list[str] | None
+) -> tuple[float | None, float | None, float | None]:
+    """(equity, unrealized_pnl, position_notional) for a leader.
 
-    INV 1 says `user_state` covers the base dex only, so this understates any
-    leader with a HIP-3 book. That is acceptable HERE and nowhere else: this is
-    a screening signal shown to a human, not a position-management read, and
-    the solvency gate in `src/leaders.py` that we are mirroring uses exactly
-    this same base-only figure. The report labels the column accordingly.
+    `equity` comes from `src/leaders._perp_equity_usd`, deliberately imported
+    rather than reimplemented: this script exists to predict which wallets the
+    live gate selects, so a second copy of the rule is a way to be confidently
+    wrong. `test_unreadable_equity_fails_OPEN_and_does_not_disqualify` pins the
+    parity. It reads EVERY clearinghouse (P0c, 2026-08-15) — the earlier
+    base-only read scored our own pinned incumbent at $0 (INV 1).
+
+    Unrealized and notional are still BASE-dex only, so both understate a
+    leader whose book is mostly HIP-3. They are printed, never screened on, and
+    the report's caveats say so. Fixing them needs the per-dex position merge,
+    which is out of scope here.
 
     Unrealized and notional are printed because INV 9 forbids judging a leader
     on realized fills alone — a martingale that closes only winners backtests
     perfectly while holding a catastrophic open loss.
     """
+    equity = _perp_equity_usd(
+        info, address.lower(), min_usd=min_equity_usd, dex_names=dex_names
+    )
     try:
         st = info.user_state(address.lower()) or {}
     except Exception:
-        return None, None, None
+        return equity, None, None
     summary = st.get("marginSummary") or {}
     try:
-        equity = float(summary.get("accountValue", 0) or 0)
         notional = float(summary.get("totalNtlPos", 0) or 0)
     except (TypeError, ValueError):
-        return None, None, None
+        return equity, None, None
     unrealized = 0.0
     for ap in st.get("assetPositions", []) or []:
         pos = ap.get("position") if isinstance(ap, dict) else None
@@ -133,6 +144,10 @@ def gather(cfg: Config, limit: int, our_taker_bps: float) -> list[Candidate]:
     info = Info(base_url="https://api.hyperliquid.xyz", skip_ws=True)
     traders = liq.top_traders(period=cfg.discovery.period, n=limit)
     print(f"leaderboard: {len(traders)} wallets (period={cfg.discovery.period})", file=sys.stderr)
+    # Once for the sweep, like discover_leaders does per cycle — it describes
+    # the exchange, not a wallet.
+    dex_names = hip3_dex_names(info)
+    print(f"HIP-3 clearinghouses: {dex_names}", file=sys.stderr)
 
     out: list[Candidate] = []
     for i, t in enumerate(traders, 1):
@@ -153,7 +168,9 @@ def gather(cfg: Config, limit: int, our_taker_bps: float) -> list[Candidate]:
             lookback_hours=cfg.discovery.score_lookback_hours,
             our_taker_bps=our_taker_bps,
         )
-        equity, unreal, notional = _fetch_account(info, t.address)
+        equity, unreal, notional = _fetch_account(
+            info, t.address, cfg.discovery.min_leader_equity_usd, dex_names
+        )
         out.append(Candidate(t, metrics, econ, equity, unreal, notional))
     return out
 
@@ -411,8 +428,10 @@ def _recommend(
     print("   - Every PnL figure is REALIZED (INV 10). The `unreal` column is the open")
     print("     opinion; a leader can show a clean net_edge while sitting on a large open")
     print("     loss (INV 9 — realized-fill stats alone have produced five false positives).")
-    print("   - equity/unreal are BASE-dex only (INV 1). A leader whose book is mostly")
-    print("     HIP-3 will read smaller here than they are.")
+    print("   - `equity` reads EVERY clearinghouse and is the best SINGLE dex, never a")
+    print("     sum (INV 2 — each dex settles against its own collateral).")
+    print("   - `unreal` is still BASE-dex only (INV 1), so it understates a leader whose")
+    print("     book is mostly HIP-3. It is printed, never screened on.")
     print(f"   - One leaderboard snapshot of {len(cands)} wallets, period={cfg.discovery.period}.")
     print("     A single snapshot is not a distribution: re-run across several days before")
     print("     concluding that a threshold is or is not binding.")

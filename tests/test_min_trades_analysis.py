@@ -124,7 +124,11 @@ def test_coarse_volume_and_pnl_have_their_own_reasons():
 
 
 def test_insolvent_leader_is_rejected_by_the_solvency_gate():
-    """INV 9 / 2026-08-15: 44 of the top 60 leaderboard wallets held $0 equity."""
+    """INV 9 / 2026-08-15: a leaderboard rank is history, not a balance.
+
+    (The old "44 of the top 60 hold $0 equity" figure was a base-dex-only
+    artifact — INV 1, see P0c. `equity` now reads every clearinghouse.)
+    """
     ok, reason = screen(_cand(equity=12.0), _cfg(min_leader_equity_usd=500.0), 50, 0.0)
     assert ok is False
     assert reason == "equity=$12 < $500"
