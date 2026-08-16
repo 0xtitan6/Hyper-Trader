@@ -73,7 +73,19 @@ discovery:
     # - "0x8607a7d180de23645db594d90621d837749408d5"
     # rank 20 — recurring quality: gave us PENDLE +$1.86 on 2026-05-06.
     # Backtest: +$60 net but Sharpe 0.04 (coin flip), kept at lower weight
-    - "0x6cd520c1a07c9b53b33d62d04d3c2a3175161968"
+    # DROPPED 2026-08-16: LOSER 6th consecutive measurement, executing the
+    # explicit "next negative run: drop" commitment made on 08-15. 30d @ $216.51
+    # proxy: 2000 trades / 805 closes, 35% hit, net -$6.25, sharpe -0.11,
+    # maxDD $12.67 (2.0x |net|). Not a bag-holder artifact — clearinghouseState
+    # is healthy ($32.9k equity, +$811 unrealized = +2.5%, 3-10x cross), so the
+    # negative copy-edge is real, not a closedPnl illusion.
+    # The old "losses are only the xyz surface" carve-out is not actionable:
+    # this window is crypto +$4.27 / xyz -$10.52, but [discovery] has no
+    # per-surface scoping knob, so the only levers are keep-whole or drop-whole.
+    # Across 6 windows it has never held positive risk-adjusted edge; it
+    # oscillates around zero and pays fees to do it. Freeing the HL-cap slot.
+    # Re-add only on positive backtest evidence.
+    # - "0x6cd520c1a07c9b53b33d62d04d3c2a3175161968"
     # 2026-08-14: PINNED. Best risk-adjusted leader we have ever measured —
     # 30d backtest at $200 proxy: 1879 trades, 80% hit, sharpe +0.59,
     # +$18.29 net, maxDD only $1.24. Was auto-discovered only, so any
@@ -116,7 +128,10 @@ discovery:
     # book. Halves the bleed, keeps the slot measurable. Next negative run: drop.
     # Mute check: fixed_usd $30 * 0.5 = $15 clip, clears min_per_trade_usd $10
     # after floor-rounding — this is a real cut, NOT a silent mute.
-    "0x6cd520c1a07c9b53b33d62d04d3c2a3175161968": 0.5
+    # 2026-08-16: dropped from always_follow (LOSER 6x, net -$6.25 / sharpe
+    # -0.11 / 35% hit @ $216.51 proxy). Weight removed with it — an explicit
+    # drop, NOT a mute-by-rounding.
+    # "0x6cd520c1a07c9b53b33d62d04d3c2a3175161968": 0.5
     # 2026-08-14: concentrate on the sharpe leader (0.59 vs 0.26). Auto-weighting
     # had it at 1.36; 1.5 is a modest deliberate bump, not a new regime.
     # 2026-08-15: 1.5 -> 2.0. Now that it actually executes (it placed ZERO
