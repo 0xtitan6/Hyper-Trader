@@ -210,3 +210,4 @@ decision before it moves to READY.
 - `leader_reconcile` HIP-3 blindness (tried to auto-close 6 live positions)
 - dropped-leader orphan detection (P1, detect-only)
 - min_trades analysis (P2 — verdict: NOT the binding constraint, leave at 50)
+- WS health false-positive (P2) — all 3 subs are `userFills`, which only push on fills, so quiet leaders trip the 630s staleness threshold. 82 rebuilds on 08-15 vs ~9/day on 08-13/14. Self-heals (replays 3/3 subs), but each rebuild logs "Marked 30 snapshot fills as seen" — a leader fill landing inside the reconnect gap could be marked seen and never copied. Investigate: gate staleness on a heartbeat/allMids sub instead of fills, and verify the snapshot-seen path can't swallow an uncopied fill.

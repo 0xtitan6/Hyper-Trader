@@ -17,3 +17,6 @@ htmlcov/
 
 # Agent worktrees (embedded git repos, never commit)
 .claude/worktrees/
+
+# scratch files from agent runs
+_*.py
