@@ -144,7 +144,32 @@ discovery:
     # capacity actually is — 64% of this leader's flow is xyz:, which has its
     # own collateral and its own $500 cap with room. +0.5 is the per-run bound
     # the strategist works to; not exceeding it just because I'm doing it by hand.
-    "0x819d06c03a978a86d6884b11fbca4d228ea0d106": 2.0
+    # 2026-08-17: 2.0 -> 1.5. Reversing the 08-15 concentration bump. Two
+    # independent signals, both pointing the same way:
+    #   (1) Risk-adjusted edge degraded ~4x across three windows. 30d @ $218.20
+    #       proxy: 1891 trades / 344 closes, 62% hit, net +$7.84, sharpe +0.14,
+    #       maxDD $19.26. Trajectory sharpe 0.59 -> 0.48 -> 0.14; hit 80% -> 75%
+    #       -> 62%; maxDD/net 0.13x -> 0.11x -> 2.46x. Still net-POSITIVE, so
+    #       this is NOT a LOSER (maxDD $19.26 < 4x net $31.36) and it is NOT
+    #       unpinned — but it now fails the KEEPER test (maxDD > 2x net), so the
+    #       deliberate bump that assumed a 0.5 sharpe is no longer supported.
+    #   (2) Step-2 clearinghouseState is the WORST we have seen on this wallet.
+    #       base: $205.39 equity carrying $13,638.74 gross = 66.4x book leverage,
+    #       a single -0.2152 BTC short at 40x ISOLATED, -$118.05 unrealized =
+    #       -57.5% of equity, withdrawable $0.00. xyz: $80.75 equity / $2,515.35
+    #       gross = 31.2x, -$1.94 (-2.4%). The base leg alone trips two of the
+    #       three Step-2 reject criteria (unrealized loss > 30% of equity;
+    #       extreme leverage), and it reframes the closedPnl record: part of the
+    #       "edge" is simply a large BTC short that has never been realized.
+    # Cut is -0.5 = the per-run bound, so 1.5 is as far as this run can go.
+    # NOT dropping: backtest net is still positive, it is the only leader we
+    # have (auto-discovery surfaces nobody — full top-50 sweep on 08-16 failed
+    # all 27 non-pinned candidates), and the guardrail is to unpin only on clear
+    # NEGATIVE evidence. If unrealized keeps deepening or the next window goes
+    # net-negative, cut again / drop.
+    # Mute check: fixed_usd $30 * 1.5 = $45 clip, clears min_per_trade_usd $10
+    # after floor-rounding. Real size cut, NOT a silent mute-by-rounding.
+    "0x819d06c03a978a86d6884b11fbca4d228ea0d106": 1.5
     # Dropped from always_follow 2026-07-20 (0 trades / dead slot).
     # "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8": 1.2
 
