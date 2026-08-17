@@ -65,6 +65,53 @@ item and needs a scale definition first. Keep this surgical.
 
 ---
 
+## READY — P0: maker shadow harness — prove the edge BEFORE it touches money
+
+The maker on `wip/maker-hip4` has never run live. Before it does, it must be
+measured — and **a naive market-maker backtest is worse than no backtest**,
+because it flatters itself in three specific ways:
+
+1. **It assumes fills.** Price touching your quote does not mean you traded —
+   you are behind a queue you cannot see. A replay that fills you on touch
+   invents PnL.
+2. **It ignores adverse selection**, which is the entire risk of making. You
+   get filled precisely when the market is about to move against you. A backtest
+   that books the spread and stops has measured the good half of the trade.
+3. **It ignores our own impact.** Our quote changes the book we are quoting into.
+
+So: shadow mode against LIVE data, not a historical replay.
+
+**Acceptance criteria**
+1. Shadow runner: the maker's real quoting logic (`src/maker.py`, `dry_run=True`)
+   against the live feed, submitting NOTHING. Log every intended quote with
+   timestamp, side, price, size, and the book at that moment.
+2. Subscribe to the venue's public trades. For each shadowed quote, decide
+   whether it would plausibly have filled — and be **pessimistic**: require the
+   trade to cross our price, and assume we are last in queue at that level.
+   State the queue assumption explicitly in the output; it is the single
+   biggest source of self-flattery.
+3. **Mark-outs — this is the headline number.** For every simulated fill, record
+   mid-price move at **t+1s, +10s, +60s**, signed so positive = the market moved
+   our way. Persistently negative mark-outs mean we are being picked off, and
+   that is a NO-GO however good the gross spread capture looks.
+4. Net edge per fill = spread captured − adverse selection (markout) − fees.
+   Use the REAL fee for the surface: HIP-3 measured at **0.86 bps**, base at
+   **4.32 bps**. Do not assume a rebate — we are tier 0 and rebates need >0.5%
+   of 14D maker volume share, which we will never have.
+5. Inventory: report max and time-weighted absolute inventory, and how often it
+   would have hit the configured cap. A maker that is always one-sided is a
+   directional bet wearing a maker's clothes.
+6. Report REALIZED terms only (INV 10), with a significance test like
+   `scripts/realized_pnl.py` — n, mean, standard error, and a plain
+   YES/NO on whether the sample supports a conclusion.
+7. Full suite green.
+
+**Go-live gate (PM decision, not the executor's):** positive net edge per fill
+AND non-negative mark-outs at 10s AND inventory staying inside caps, over a
+sample the harness itself calls sufficient. Anything less and it does not trade.
+
+---
+
 ## READY — P0b: mirror target POSITION, not deltas (needs shadow test)
 
 The deeper flaw behind P0. We copy *changes* when we should track *state*:
