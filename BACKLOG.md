@@ -81,6 +81,30 @@ because it flatters itself in three specific ways:
 
 So: shadow mode against LIVE data, not a historical replay.
 
+**PRIORITY SURFACE — measured 2026-08-17, top-of-book from `l2Book` (NOT
+`impactPxs`; impact prices are the cost to move size and overstate the quotable
+spread ~4x, e.g. para:IREN reads 58.0 impact vs 58.0 TOB but xyz:GIGADEV reads
+125.3 impact vs 3.2 TOB):**
+
+```
+coin            TOB spread   depth bid/ask     net vs 2x fee
+para:SMCI          58.1 bps   $148k / $152k       +56.3
+para:IREN          58.0 bps    $42k /  $97k       +56.3
+xyz:SOFTBANK       27.4 bps    $146 / $5,134      +25.7
+para:UNITREE       26.7 bps    $927 / $1,895      +25.0
+PURR (base)        22.2 bps    $131 /   $240      +13.5
+```
+
+Quote `para:SMCI` and `para:IREN` FIRST — real two-sided depth, and a gross
+spread ~34x our 1.72 bps HIP-3 round trip. For contrast, base perps cost 8.64
+bps round trip and are frequently tighter than that.
+
+**The thing that decides it:** these are tokenized equities. The spread may be
+wide precisely BECAUSE the flow is toxic — someone arbing the real stock against
+a stale perp oracle picks us off exactly when we are wrong, and 58 bps does not
+cover that. Mark-outs are the only test that distinguishes "wide spread" from
+"wide spread for a reason". Do not skip to a fee-vs-spread conclusion.
+
 **Acceptance criteria**
 1. Shadow runner: the maker's real quoting logic (`src/maker.py`, `dry_run=True`)
    against the live feed, submitting NOTHING. Log every intended quote with
