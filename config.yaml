@@ -91,6 +91,25 @@ discovery:
     # +$18.29 net, maxDD only $1.24. Was auto-discovered only, so any
     # discovery refresh could rotate it out. Pinning protects the edge.
     - "0x819d06c03a978a86d6884b11fbca4d228ea0d106"
+    # 2026-08-18: PINNED. Auto-discovered only (rank 43, auto-weight 1.24), so any
+    # discovery refresh could rotate it out — the same exposure that got
+    # 0x819d06c0 pinned on 08-14. It is invisible to Step-1 (backtest scores
+    # always_follow only), so it was measured with a temp config: 30d @ $224.12
+    # proxy = 747 trades / 206 closes, 80% hit, net +$70.60, sharpe +0.47,
+    # maxDD $25.95 (0.37x net). KEEPER on every criterion, and by far the best
+    # risk-adjusted evidence in the book (the pinned incumbent is at -$0.49).
+    # Step-2 clearinghouseState is CLEAN, not a closedPnl illusion:
+    # xyz equity $10,947.62, gross $53,802 = 4.9x, single 5x ISOLATED SKHX long,
+    # unrealized +$327.71 = +3.0% of equity (POSITIVE — not an averaging-down
+    # bag-holder), withdrawable $0. Base dex is $0/0 positions; per INV 1 that
+    # is normal, the wallet lives on xyz. Equity $10.9k clears the $500
+    # solvency gate ~22x.
+    # CONCENTRATION CAVEAT: this is effectively an xyz:SKHX specialist —
+    # +$59.28 of the +$70.60 is one symbol. Pinned at its existing auto-weight
+    # (no size increase) precisely because it is single-window, single-symbol
+    # evidence. Bump only on a second independent positive window on a
+    # different symbol; drop if SKHX turns and the edge was just that trade.
+    - "0x9551e7d4cd963558bb9882aecc74f549262e217f"
     # rank 42 — SOL perp specialist. DROPPED 2026-07-20: 30d backtest = 0 trades
     # (dead slot). Freed for auto-discovery; re-add only on positive evidence.
     # - "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8"
@@ -169,7 +188,35 @@ discovery:
     # net-negative, cut again / drop.
     # Mute check: fixed_usd $30 * 1.5 = $45 clip, clears min_per_trade_usd $10
     # after floor-rounding. Real size cut, NOT a silent mute-by-rounding.
-    "0x819d06c03a978a86d6884b11fbca4d228ea0d106": 1.5
+    # 2026-08-18: 1.5 -> 1.0. LOSER rule fires — the window went net-NEGATIVE,
+    # which is the exact condition the 08-17 entry pre-committed to acting on
+    # ("if unrealized keeps deepening or the next window goes net-negative,
+    # cut again / drop"). 30d @ $224.12 proxy: 1912 trades / 325 closes,
+    # 56% hit, net -$0.49, sharpe +0.04, maxDD $15.02 (30.6x |net|).
+    # Four-window decay is now unambiguous:
+    #   net   +$18.29 -> (+) -> +$7.84 -> -$0.49
+    #   sharpe  +0.59 -> +0.48 -> +0.14 -> +0.04
+    #   hit       80% ->   75% ->   62% ->   56%  (coin flip)
+    # CUT, not dropped, for two reasons. (a) The evidence is not "clear
+    # negative" — -$0.49 over 325 closes is flat-plus-fees, not a bleed, and
+    # the pin guardrail requires clear negative evidence to unpin. (b) The
+    # other half of the 08-17 trigger did NOT fire: Step-2 unrealized
+    # RECOVERED hard, base equity $111.54 with the BTC short now +$16.27
+    # (+14.6% of equity) vs -$118.05 (-57.5%) yesterday. Still 40x ISOLATED /
+    # 35x book, which is why it gets no benefit of the doubt beyond this.
+    # Next negative window: drop. Note that unpinning also removes it from
+    # discovery entirely — at ~$111 total perp equity it fails the $500
+    # solvency gate, so there is no auto-discovery fallback for this slot.
+    # Mute check: fixed_usd $30 * 1.0 = $30 clip, clears min_per_trade_usd $10
+    # after floor-rounding. Real size cut, NOT a silent mute-by-rounding.
+    "0x819d06c03a978a86d6884b11fbca4d228ea0d106": 1.0
+    # 2026-08-18: pinned this run (see always_follow). Weight set to 1.25,
+    # which is where auto-weighting already had it (1.24) — this is a
+    # rotation-protection pin, NOT a size increase. "Prefer cutting losers
+    # over adding risk": the only size change this run is the -0.5 above.
+    # Mute check: fixed_usd $30 * 1.25 = $37.50 clip, clears min_per_trade_usd
+    # $10 after floor-rounding. Real size, NOT a mute-by-rounding.
+    "0x9551e7d4cd963558bb9882aecc74f549262e217f": 1.25
     # Dropped from always_follow 2026-07-20 (0 trades / dead slot).
     # "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8": 1.2
 
