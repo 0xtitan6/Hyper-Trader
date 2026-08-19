@@ -90,7 +90,28 @@ discovery:
     # 30d backtest at $200 proxy: 1879 trades, 80% hit, sharpe +0.59,
     # +$18.29 net, maxDD only $1.24. Was auto-discovered only, so any
     # discovery refresh could rotate it out. Pinning protects the edge.
-    - "0x819d06c03a978a86d6884b11fbca4d228ea0d106"
+    # DROPPED 2026-08-19: LOSER rule fires and the 08-18 pre-commitment
+    # ("Next negative window: drop") is executed. SECOND consecutive negative
+    # 30d window. @ $209.76 proxy: 1943 trades / 289 closes, 42% hit,
+    # net -$0.99, sharpe +0.02, maxDD $12.23 (12.3x |net|).
+    # Five-window decay is monotonic on every measure:
+    #   net    +$18.29 -> +$7.84 -> -$0.49 -> -$0.99
+    #   sharpe   +0.59 -> +0.48 -> +0.14 -> +0.04 -> +0.02
+    #   hit        80% ->   75% ->   62% ->   56% ->   42%  (BELOW coin flip)
+    # Not a closedPnl illusion in either direction — Step-2 is benign this run
+    # (base $84.12 equity / $3,603 gross = 42.8x, BTC -0.056 @ 40x isolated,
+    # unrealized only -$2.74 = -3.3%; xyz $42.55 / $308 = 7.3x, +$10.42).
+    # What Step-2 DOES show is attrition: the leader's own base equity has gone
+    # $205.39 -> $111.54 -> $84.12 in three days (-59%). It is not bag-holding,
+    # it is simply losing.
+    # The one argument that kept this slot alive through four prior cuts —
+    # "it is the only leader we have" — no longer applies: 0x9551e7d4 is now
+    # pinned and measurable. Paying $12.23 of drawdown (5.8% of account) for
+    # zero expected return is a bad trade regardless of significance.
+    # Unpinning also removes it from auto-discovery (~$127 total equity fails
+    # the $500 solvency gate), which is intended. Re-add only on positive
+    # backtest evidence.
+    # - "0x819d06c03a978a86d6884b11fbca4d228ea0d106"
     # 2026-08-18: PINNED. Auto-discovered only (rank 43, auto-weight 1.24), so any
     # discovery refresh could rotate it out — the same exposure that got
     # 0x819d06c0 pinned on 08-14. It is invisible to Step-1 (backtest scores
@@ -209,14 +230,42 @@ discovery:
     # solvency gate, so there is no auto-discovery fallback for this slot.
     # Mute check: fixed_usd $30 * 1.0 = $30 clip, clears min_per_trade_usd $10
     # after floor-rounding. Real size cut, NOT a silent mute-by-rounding.
-    "0x819d06c03a978a86d6884b11fbca4d228ea0d106": 1.0
+    # 2026-08-19: dropped from always_follow (LOSER, 2nd consecutive negative
+    # window, 42% hit). Weight removed WITH it — an explicit drop, NOT a
+    # mute-by-rounding.
+    # "0x819d06c03a978a86d6884b11fbca4d228ea0d106": 1.0
     # 2026-08-18: pinned this run (see always_follow). Weight set to 1.25,
     # which is where auto-weighting already had it (1.24) — this is a
     # rotation-protection pin, NOT a size increase. "Prefer cutting losers
     # over adding risk": the only size change this run is the -0.5 above.
     # Mute check: fixed_usd $30 * 1.25 = $37.50 clip, clears min_per_trade_usd
     # $10 after floor-rounding. Real size, NOT a mute-by-rounding.
-    "0x9551e7d4cd963558bb9882aecc74f549262e217f": 1.25
+    # 2026-08-19: 1.25 -> 0.75. Backtest still reads KEEPER (net +$66.62,
+    # sharpe +0.47, 80% hit, maxDD $24.48 = 0.37x net @ $209.76 proxy) but
+    # STEP-2 NOW TRIPS THE REJECT CRITERION, and it trips on the exact symbol
+    # that IS the edge. clearinghouseState xyz: equity $18,934.10, a single
+    # xyz:SKHX long szi 110.0 @ 5x ISOLATED, unrealized -$6,380.58 =
+    # -33.7% of equity (threshold is ~30%). base is $0/0 positions (normal
+    # per INV 1; the wallet lives on xyz).
+    # This is a ONE-DAY reversal on a wallet that was clean yesterday
+    # (+$327.71 = +3.0% of a $10,947.62 equity, $53,802 gross = 4.9x), and the
+    # leader did not cut — gross went $53.8k -> $120.0k while the position moved
+    # against it. That is averaging down into a loser, i.e. precisely the
+    # martingale profile the Step-2 rule exists to catch: closes the winners
+    # (80% hit, +$55.94 of the +$66.62 net is xyz:SKHX) and holds the loser.
+    # The concentration caveat written at pin time ("drop if SKHX turns and the
+    # edge was just that trade") is now live. Our own mirror is already carrying
+    # xyz:SKHX szi +0.2140 at -$19.81, our largest single unrealized loss.
+    # CUT, not dropped: net edge is genuinely positive across two windows and
+    # non-SKHX symbols are positive too (CXMT +$7.74, SMSN +$2.94), so this is
+    # not yet "clear negative evidence". -0.5 is the per-run bound. If SKHX
+    # unrealized deepens or the next window goes net-negative: drop.
+    # NO BUMP was considered: the 08-18 pin required "a second INDEPENDENT
+    # positive window on a different symbol" before any size increase, and this
+    # 30d window overlaps the last one ~97%. It is not independent evidence.
+    # Mute check: fixed_usd $30 * 0.75 = $22.50 clip, clears min_per_trade_usd
+    # $10 after floor-rounding. Real size cut, NOT a silent mute-by-rounding.
+    "0x9551e7d4cd963558bb9882aecc74f549262e217f": 0.75
     # Dropped from always_follow 2026-07-20 (0 trades / dead slot).
     # "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8": 1.2
 
