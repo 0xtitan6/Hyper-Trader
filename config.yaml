@@ -265,7 +265,45 @@ discovery:
     # 30d window overlaps the last one ~97%. It is not independent evidence.
     # Mute check: fixed_usd $30 * 0.75 = $22.50 clip, clears min_per_trade_usd
     # $10 after floor-rounding. Real size cut, NOT a silent mute-by-rounding.
-    "0x9551e7d4cd963558bb9882aecc74f549262e217f": 0.75
+    # 2026-08-20: 0.75 -> 1.0. PARTIAL restore of the 08-19 cut, because the
+    # sole justification for that cut has fully reversed in the leader's own book.
+    # Step-2 clearinghouseState is now CLEAN and strongly positive:
+    #   xyz equity $20,575.29 (up from $18,934.10), a single xyz:SKHX long
+    #   szi 70.0 @ 5x ISOLATED, gross $84,357, 4.1x book leverage,
+    #   unrealized +$4,578.41 = +22.3% of equity. base $0/0 positions (normal
+    #   per INV 1; the wallet lives on xyz).
+    # The decisive fact is the SIZE PATH, not the mark. Yesterday the reject
+    # fired because gross went $53.8k -> $120.0k WHILE the position moved
+    # against it (szi 110.0, -$6,380.58 = -33.7% of equity) = averaging down.
+    # Today szi is 110.0 -> 70.0 and gross $120.0k -> $84.4k: the leader CUT
+    # into the drawdown and the position recovered. That is the opposite of the
+    # martingale profile Step-2 exists to catch, and it retroactively reframes
+    # yesterday's snapshot as a mark-to-market dip on a position that was being
+    # actively reduced, not a bag being held. Our own mirror de-risked with it
+    # (xyz:SKHX szi 0.2140 @ -$19.81 -> 0.0680 @ +$2.14).
+    # Backtest is KEEPER on every criterion, 30d @ $226.81 proxy:
+    #   868 trades / 215 closes, 80% hit, net +$52.85, sharpe +0.48,
+    #   maxDD $18.68 = 0.35x net.
+    # Two independent windows now agree on the risk-adjusted shape:
+    #   sharpe +0.47 -> +0.48, hit 80% -> 80%, maxDD/net 0.37x -> 0.35x.
+    # WHY +0.25 AND NOT +0.5 (the per-run bound):
+    #   (a) The 08-18 pin pre-committed to bumping only on "a second INDEPENDENT
+    #       positive window on a DIFFERENT symbol". That condition is still
+    #       UNMET — this 30d window overlaps the last one ~97%, and xyz:SKHX is
+    #       still +$44.70 of the +$52.85 (85% of the edge). Concentration risk
+    #       is unchanged; only the bag-holder risk cleared.
+    #   (b) This wallet has now swung -$6.4k -> +$4.6k unrealized in ONE day.
+    #       Cutting on one day's move and fully restoring on the next is
+    #       whipsaw, not evidence. A half-step tracks the resolved reject
+    #       without re-underwriting the concentration.
+    # So this is a partial reversal of a risk cut whose cause is gone, NOT a new
+    # concentration bump. Stops one notch short of the 1.25 auto-weight.
+    # Drop trigger unchanged: if SKHX unrealized turns negative >30% of equity
+    # again WITH gross rising, or the next window goes net-negative.
+    # Mute check: fixed_usd $30 * 1.0 = $30 clip, clears min_per_trade_usd $10
+    # after floor-rounding, and is well under max_per_trade_usd $120. Real
+    # size, NOT a silent mute-by-rounding.
+    "0x9551e7d4cd963558bb9882aecc74f549262e217f": 1.0
     # Dropped from always_follow 2026-07-20 (0 trades / dead slot).
     # "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8": 1.2
 
