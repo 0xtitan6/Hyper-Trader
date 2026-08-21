@@ -282,3 +282,52 @@ decision before it moves to READY.
 - dropped-leader orphan detection (P1, detect-only)
 - min_trades analysis (P2 — verdict: NOT the binding constraint, leave at 50)
 - WS health false-positive (P2) — all 3 subs are `userFills`, which only push on fills, so quiet leaders trip the 630s staleness threshold. 82 rebuilds on 08-15 vs ~9/day on 08-13/14. Self-heals (replays 3/3 subs), but each rebuild logs "Marked 30 snapshot fills as seen" — a leader fill landing inside the reconnect gap could be marked seen and never copied. Investigate: gate staleness on a heartbeat/allMids sub instead of fills, and verify the snapshot-seen path can't swallow an uncopied fill.
+
+---
+
+## READY — P2: leader scoring + backtest are truncated to 2,000 fills (oldest-first)
+
+**Problem.** `leader_score._fetch_fills` calls `userFillsByTime` with only
+`startTime` and no pagination. HL caps that response at **2,000 fills and
+returns them oldest-first**. For a high-frequency wallet the "30-day" scoring
+window therefore only ever sees the first ~2 days of the window, and the rest
+of the month is invisible.
+
+Measured 2026-08-21 on `0x7177edd4` (leaderboard rank 2, $48,496 PnL, 30,127
+trades, $4.38M volume, and genuinely funded: **$776,961 on xyz across 5
+positions + $1.18M spot USDC**):
+
+```
+userFillsByTime(startTime = now-30d) -> 2000 fills, ALL of them #NNNNN
+  coins: {'#10411': 475, '#10410': 398, '#10331': 351, '#10330': 311, ...}
+userFills (most recent 2000)         -> xyz:UNITREE 798, xyz:CXMT 186, ...
+```
+
+`_is_perp_coin` classifies `#NNNNN` as non-perp, so with `score_perp_only:
+true` the perp count is 0 and the quality filter rejects it as
+`trades=0 < 50` — a wallet with 30k trades. The two windows do not even
+overlap: the oldest-2000 slice and the newest-2000 slice share no coins.
+
+**This affects the backtest too**, which is the part that matters. `src.backtest`
+scored the same wallet at **0 trades / 0 closes / $0.00 net**. So we cannot
+currently tell the difference between "this leader has no copyable edge" and
+"we truncated the window before reaching their copyable fills". Every
+`trades=0` and every low-trade-count backtest on a high-frequency wallet is
+currently unfalsifiable.
+
+**Not a claim of missed edge.** The visible slice of `0x7177edd4` is outcome
+markets we do not copy; it may well be a genuine dead slot. The defect is that
+the measurement cannot answer the question either way.
+
+**Fix.** Paginate: loop `userFillsByTime` advancing `startTime` past the last
+returned `time` until a page returns < 2,000 rows or the window is covered
+(cap total pages, and de-dupe on `tid` — page boundaries repeat fills that
+share a millisecond). Apply to `leader_score._fetch_fills` and to whatever
+`src/backtest.py` uses to pull leader history — they must use the same helper,
+or discovery and the backtest will disagree about what a leader did.
+
+**Acceptance.** For `0x7177edd4` over 30d, the fill count exceeds 2,000 and
+the returned coin distribution contains both `#NNNNN` and `xyz:*` fills;
+`0x9551e7d4`'s existing backtest numbers (868 trades / 215 closes / +$59.91 @
+$226.75 proxy) change by no more than rounding when the window is unchanged;
+no fill appears twice by `tid`.
