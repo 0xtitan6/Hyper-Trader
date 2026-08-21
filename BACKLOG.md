@@ -285,7 +285,24 @@ decision before it moves to READY.
 
 ---
 
-## READY — P2: leader scoring + backtest are truncated to 2,000 fills (oldest-first)
+## DONE 2026-08-21 — P2: leader scoring + backtest are truncated to 2,000 fills (oldest-first)
+
+Fixed on `fix/paginate-leader-fills`. One shared pager (`src/hl_fills.py`) now
+backs `leader_score.load_metrics`, `backtest.fetch_fills` and
+`scripts/realized_pnl.fetch_fills`. Verified live 2026-08-21:
+`0x7177edd4` 2,000 -> **13,004** fills over 30d, both `#NNNNN` and `xyz:*`
+present, 0 duplicate `tid`s; `0x9551e7d4` on an unchanged window is identical
+old-vs-new (868 trades / 215 closes / net $52.85 — the $59.91 in the original
+item was a 30d window that has since rolled forward, not a change from this
+fix). Screen effect: `0x7177edd4` goes from the FALSE `trades=0 < 50` to the
+true `holding_p50=1s < 60s` (1,832 perp trades, -$226,473 realized).
+
+Follow-up worth an item: discovery pays up to 20 pages on ultra-HFT wallets it
+will always reject. Pre-filtering on the leaderboard's own `trades` field
+before scoring would drop that to near zero.
+
+<details><summary>original item</summary>
+
 
 **Problem.** `leader_score._fetch_fills` calls `userFillsByTime` with only
 `startTime` and no pagination. HL caps that response at **2,000 fills and
@@ -331,3 +348,5 @@ the returned coin distribution contains both `#NNNNN` and `xyz:*` fills;
 `0x9551e7d4`'s existing backtest numbers (868 trades / 215 closes / +$59.91 @
 $226.75 proxy) change by no more than rounding when the window is unchanged;
 no fill appears twice by `tid`.
+
+</details>

@@ -65,13 +65,17 @@ from typing import Any
 
 from hyperliquid.info import Info
 
+from src.hl_fills import HL_FILL_PAGE_LIMIT, paginate_user_fills
+
 # The reconcile HIP-3 fix (INV 1) — the point after which an xyz fill was placed
 # by a bot that could actually size and hold an xyz position. Everything before
 # this is contaminated by the broken period and must not be pooled with it.
 POST_FIX_ISO = "2026-08-15T13:47:00Z"
 
-# HL's hard page size for userFillsByTime. Hit silently — see the module header.
-HL_FILL_PAGE_LIMIT = 2000
+# HL's hard page size for userFillsByTime lives in `src.hl_fills` and is
+# re-exported here for the callers/tests that already import it from this
+# module. One definition: two copies is how the pagers drift apart.
+__all_page_limit__ = HL_FILL_PAGE_LIMIT
 
 SURFACE_BASE = "base"
 SURFACE_HIP3 = "hip3"
@@ -145,48 +149,25 @@ def fetch_fills(info: Any, address: str, since_ms: int) -> list[dict[str, Any]] 
     much we traded. A caller that cannot tell them apart will report a failed
     fetch as a flat surface.
 
-    Pagination walks `startTime` forward to the last fill's timestamp. That
-    bound is INCLUSIVE, so pages overlap by at least the boundary fill — we
-    dedupe on `tid`, which is unique per fill.
+    The paging itself lives in `src.hl_fills` so that this script, discovery
+    (`leader_score`) and `src.backtest` cannot drift into three different ideas
+    of what a wallet's history is.
     """
-    out: list[dict[str, Any]] = []
-    seen: set[Any] = set()
-    cursor = since_ms
-    for _ in range(200):  # bounded: ~400k fills, far beyond this account
+
+    def fetch_page(start_ms: int) -> list[dict[str, Any]] | None:
         try:
-            batch = info.post(
+            return info.post(
                 "/info",
-                {"type": "userFillsByTime", "user": address.lower(), "startTime": cursor},
+                {"type": "userFillsByTime", "user": address.lower(), "startTime": start_ms},
             )
         except Exception as e:  # noqa: BLE001 — partial data would be a wrong answer
-            print(f"  ! fills fetch failed at {iso(cursor)}: {type(e).__name__}: {e}",
+            print(f"  ! fills fetch failed at {iso(start_ms)}: {type(e).__name__}: {e}",
                   file=sys.stderr)
             return None
-        if not isinstance(batch, list):
-            print(f"  ! fills fetch returned {type(batch).__name__}, expected list",
-                  file=sys.stderr)
-            return None
-        if not batch:
-            break
-        for f in batch:
-            tid = f.get("tid")
-            if tid is not None and tid in seen:
-                continue
-            if tid is not None:
-                seen.add(tid)
-            out.append(f)
-        if len(batch) < HL_FILL_PAGE_LIMIT:
-            break
-        nxt = int(batch[-1].get("time", 0))
-        # No forward progress means the whole page shares one timestamp; walking
-        # by +1ms would silently drop the rest of it, so stop and say so rather
-        # than under-report.
-        if nxt <= cursor:
-            print(f"  ! pagination stalled at {iso(cursor)} — page did not advance",
-                  file=sys.stderr)
-            return None
-        cursor = nxt
-    return out
+
+    return paginate_user_fills(
+        fetch_page, since_ms, label=address[:10], page_limit=HL_FILL_PAGE_LIMIT
+    )
 
 
 @dataclass
