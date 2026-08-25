@@ -131,6 +131,37 @@ discovery:
     # evidence. Bump only on a second independent positive window on a
     # different symbol; drop if SKHX turns and the edge was just that trade.
     - "0x9551e7d4cd963558bb9882aecc74f549262e217f"
+    # 2026-08-25: PINNED. Auto-discovered ONLY (rank 33, auto-weight 1.27), so it
+    # was being copied LIVE with real money while invisible to Step-1 (backtest
+    # scores always_follow only) — the same blind spot that got 0x819d06c0 and
+    # 0x9551e7d4 pinned. Measured with a temp config, 30d @ $415.98 proxy:
+    #   174 trades / 84 closes, 64% hit, net +$82.04, sharpe +0.87,
+    #   maxDD $12.79 = 0.16x net, +$0.99/trade.
+    # That is the BEST risk-adjusted evidence in the book on every measure
+    # (incumbent 0x9551e7d4: sharpe +0.52, maxDD 0.31x net, +$0.56/trade).
+    # NOTE this is the first 30d window measured since 3c985cb fixed the
+    # userFillsByTime pagination bug — earlier windows silently scored ~2 days
+    # of fills, so these numbers are not comparable to pre-08-24 entries.
+    # Step-2 clearinghouseState is CLEAN — not a closedPnl illusion:
+    #   base equity $13,206.12, gross $130,862.45 = 9.9x book,
+    #   unrealized +$3,583.90 = +27.1% of equity (POSITIVE, not averaging down),
+    #   BTC +1.0 @ 40x cross (unreal +$3,401, liq $40,186 vs mark ~$80.6k =
+    #   ~50% buffer), HYPE +619.93 @ 10x cross (unreal +$183, liq $12.55).
+    #   xyz dex $0/0 positions. Equity clears the $500 solvency gate ~26x.
+    #   Hit rate 64% is NOT the implausible ~100% that flags never-realized bags.
+    # The 40x cross BTC leg is the one caution flag, but book leverage is 9.9x
+    # (vs the 66x that helped condemn 0x819d06c0) and the position is deep in
+    # profit with a ~50% liq buffer, so it trips no Step-2 reject criterion.
+    # DIVERSIFICATION: its edge is HYPE (crypto/base dex); the incumbent's is
+    # xyz:SKHX (HIP-3). Different symbol, different surface, different
+    # collateral pool — this is the first genuinely uncorrelated slot we have.
+    # CONCENTRATION CAVEAT: HYPE is +$81.53 of the +$82.04 (99% of the edge),
+    # so this is a single-symbol specialist just like the incumbent. Pinned at
+    # its EXISTING auto-weight (1.27) = rotation protection, NOT a size
+    # increase. Bump only on a second independent positive window; DROP if
+    # HYPE turns and the edge was just that one trade, or if unrealized goes
+    # below -30% of equity WITH gross rising (averaging down).
+    - "0xa3f996f2ec2b1fe240a57543bbfdb4d9d5804d04"
     # rank 42 — SOL perp specialist. DROPPED 2026-07-20: 30d backtest = 0 trades
     # (dead slot). Freed for auto-discovery; re-add only on positive evidence.
     # - "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8"
@@ -304,6 +335,16 @@ discovery:
     # after floor-rounding, and is well under max_per_trade_usd $120. Real
     # size, NOT a silent mute-by-rounding.
     "0x9551e7d4cd963558bb9882aecc74f549262e217f": 1.0
+    # 2026-08-25: pinned this run (see always_follow). Weight set to 1.27,
+    # which is EXACTLY where auto-sharpe weighting already had it
+    # (clip(sharpe+1.0) on its realized sharpe 0.27 = 1.27). leader_weights
+    # overrides the auto weight in src/leaders.py, so this reproduces current
+    # live sizing bit-for-bit: rotation-protection pin, ZERO size change.
+    # "Prefer cutting losers over adding risk" — no size increase this run.
+    # Mute check: fixed_usd $30 * 1.27 = $38.10 clip, clears min_per_trade_usd
+    # $10 after floor-rounding and is under max_per_trade_usd $120. Real size,
+    # NOT a silent mute-by-rounding.
+    "0xa3f996f2ec2b1fe240a57543bbfdb4d9d5804d04": 1.27
     # Dropped from always_follow 2026-07-20 (0 trades / dead slot).
     # "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8": 1.2
 
