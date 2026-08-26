@@ -334,6 +334,28 @@ discovery:
     # Mute check: fixed_usd $30 * 1.0 = $30 clip, clears min_per_trade_usd $10
     # after floor-rounding, and is well under max_per_trade_usd $120. Real
     # size, NOT a silent mute-by-rounding.
+    # 2026-08-26: HOLD at 1.0. KEEPER on every criterion, 30d @ $435.86 proxy:
+    #   900 trades / 228 closes, 82% hit, net +$124.68, sharpe +0.50,
+    #   maxDD $40.70 = 0.33x net, +$0.55/trade.
+    # Step-2 clearinghouseState CLEAN: base equity $5,236.90, gross $25,246.42
+    #   = 4.8x book, single BTC long szi 0.31916 @ 5x ISOLATED, unrealized
+    #   +$248.66 = +4.7% of equity (positive, not averaging down), liq
+    #   $63,487.92 vs mark ~$79,168 = ~20% buffer. Clears the $500 gate 10x.
+    # NO BUMP: the 08-18 pin requires "a second INDEPENDENT positive window on a
+    #   DIFFERENT symbol". Still unmet — xyz:SKHX is +$120.21 of the +$124.68
+    #   (96% of the edge), and this window overlaps the last one ~97%.
+    # WATCH ITEM FOR THE NEXT RUN — the edge surface has gone away underneath us:
+    #   this wallet's xyz clearinghouse is now $0.00 equity / 0 positions (it was
+    #   $20,575.29 with a 70.0 xyz:SKHX long on 08-20). The leader closed the
+    #   entire SKHX book and has re-based onto BTC on the base dex. So 96% of the
+    #   measured edge comes from a trade the leader is no longer in, and the
+    #   30d window will keep reporting it for ~4 more weeks as it rolls off.
+    #   Total leader equity also fell $20.6k -> $5.2k over the window.
+    #   Do NOT cut on this alone — realized closes were profitable and Step-2 is
+    #   clean — but treat the next window as measuring a DIFFERENT strategy
+    #   (BTC directional) than the one that earned this weight. If the BTC leg
+    #   is the only contributor and it goes net-negative, drop rather than cut:
+    #   the SKHX evidence does not underwrite a BTC book.
     "0x9551e7d4cd963558bb9882aecc74f549262e217f": 1.0
     # 2026-08-25: pinned this run (see always_follow). Weight set to 1.27,
     # which is EXACTLY where auto-sharpe weighting already had it
