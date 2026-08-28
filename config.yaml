@@ -1,6 +1,6 @@
 discovery:
   period: 30d             # 24h | 7d | 30d | all — 30d so always_follow leaders inactive in past 7d still show ranked metrics
-  top_n: 4                # auto-discovered slots; 4 + 5 always_follow = 9 (HL hard cap)
+  top_n: 4                # auto-discovered slots; 4 + 3 always_follow = 7 (HL hard cap 9)
   min_trades: 50
   min_volume_usd: 5000
   min_pnl_usd: 100
@@ -162,6 +162,21 @@ discovery:
     # HYPE turns and the edge was just that one trade, or if unrealized goes
     # below -30% of equity WITH gross rising (averaging down).
     - "0xa3f996f2ec2b1fe240a57543bbfdb4d9d5804d04"
+    # 2026-08-28: PINNED. Auto-discovered only, so it was trading LIVE at
+    # auto-sharpe weight 1.19 while being invisible to Step-1 (backtest scores
+    # always_follow only) — and it flickered in/out of selection between
+    # cycles (03:04 in, 02:34 out), i.e. real rotation exposure on a leader
+    # with positive measured edge. Measured with a temp config, 30d @ $412.42
+    # proxy: 606 trades / 158 closes, 68% hit, net +$96.19, sharpe +0.23,
+    # maxDD $21.16 = 0.22x net. Step-2 CLEAN: perp equity $9,807 (base $1,753
+    # + xyz $7,906 + mkts $148) plus $11,852 spot USDC; unrealized +$834.73 =
+    # +8.5% of equity (POSITIVE, not bag-holding); lev 6.7x base / 7.8x xyz;
+    # 60 fills in 24h, newest 01:47 UTC. Edge is spread over ~35 coins
+    # (xyz:NBIS +68.5, ZEC +24.9, HYPE +15.1, ONDO +15.1, BTC +12.0, with a
+    # real loss tail) — genuinely diversified, which also hedges 0x9551e7d4's
+    # single-coin xyz:SKHX concentration. Rotation-protection pin at its
+    # EXISTING auto-weight: zero per-copy size change.
+    - "0x511e60d32a1fdcafb46bae7f43cfab0a87040713"
     # rank 42 — SOL perp specialist. DROPPED 2026-07-20: 30d backtest = 0 trades
     # (dead slot). Freed for auto-discovery; re-add only on positive evidence.
     # - "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8"
@@ -385,7 +400,23 @@ discovery:
     #   Concentration is unchanged, so the evidence is stronger but not broader.
     # Mute check: fixed_usd $30 * 1.0 = $30 clip, clears min_per_trade_usd $10
     # after floor-rounding. Real size, NOT a silent mute-by-rounding.
-    "0x9551e7d4cd963558bb9882aecc74f549262e217f": 1.0
+    # 2026-08-28: 1.0 -> 1.25 (+0.25). Best risk-adjusted leader we currently
+    # hold. 30d @ $412.42 proxy: 774 trades / 172 closes, 91% hit, net
+    # +$108.72, sharpe +1.10, maxDD $1.50 = 0.014x net. Step-2 CLEAN and the
+    # 91% hit is NOT the 0xe2823659 failure mode — there is no hidden
+    # unrealized bag: base equity $4,361 w/ BTC unrealized +$351.83 (+8.1%),
+    # xyz equity $7,379 w/ xyz:SKHX unrealized only -$21.45 (-0.3%), plus
+    # $21,283 spot USDC / 4,674 HYPE. Leverage 4.7x base / 5.0x xyz
+    # (moderate). Still active: 15 fills in 24h, newest 01:20 UTC.
+    # Deliberately +0.25 and NOT the full +0.5 bound: +$108.10 of the
+    # +$108.72 net is xyz:SKHX alone, and xyz is the HIP-3 surface where
+    # reconcile/leader_reconcile still zero positions each cycle (sizing and
+    # the xyz exposure cap are known-broken, fix escalated 2026-08-15 and
+    # still awaiting Titan's go). Do not size further into that surface until
+    # the reconcile fix lands.
+    # Mute check: fixed_usd $30 * 1.25 = $37.50 clip, clears min_per_trade_usd
+    # $10 after floor-rounding.
+    "0x9551e7d4cd963558bb9882aecc74f549262e217f": 1.25
     # 2026-08-25: pinned this run (see always_follow). Weight set to 1.27,
     # which is EXACTLY where auto-sharpe weighting already had it
     # (clip(sharpe+1.0) on its realized sharpe 0.27 = 1.27). leader_weights
@@ -444,7 +475,25 @@ discovery:
     # Mute check: fixed_usd $30 * 0.77 = $23.10 clip, clears min_per_trade_usd
     # $10 after floor-rounding and is under max_per_trade_usd $120. Real size
     # cut, NOT a silent mute-by-rounding.
+    # 2026-08-28: HOLD at 0.77, no change. NOT a LOSER — 30d @ $412.42 proxy:
+    # 211 trades / 117 closes, 47% hit, net +$39.24, sharpe +0.49, maxDD
+    # $16.92 = 0.43x net, so no rule fires and last run's "edge was one day"
+    # cut is not repeated. But explicitly NO bump: Step-2 shows the wallet has
+    # gone DORMANT — perp equity $0.00 on BOTH base and xyz, zero positions,
+    # last perp fill 2026-08-26 16:37 UTC (Close Long HYPE), no fills in 34h.
+    # It flattened and pulled its perp collateral; only illiquid spot memes +
+    # 737 HYPE remain, no USDC. Un-copyable while unfunded (and below
+    # min_leader_equity_usd $500 — it survives discovery only via this pin),
+    # but costs nothing flat, and its HYPE edge is proven. WATCH: if it is
+    # still unfunded/flat at the next run, drop it from always_follow and free
+    # the slot rather than holding a dead pin.
     "0xa3f996f2ec2b1fe240a57543bbfdb4d9d5804d04": 0.77
+    # 2026-08-28: pinned this run (see always_follow). Weight set to 1.19 =
+    # its existing auto-sharpe weight, so this pin changes WHICH cycles it
+    # trades (all of them, no rotation dropout), not how big each copy is.
+    # Mute check: fixed_usd $30 * 1.19 = $35.70 clip, clears min_per_trade_usd
+    # $10 after floor-rounding.
+    "0x511e60d32a1fdcafb46bae7f43cfab0a87040713": 1.19
     # Dropped from always_follow 2026-07-20 (0 trades / dead slot).
     # "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8": 1.2
 
