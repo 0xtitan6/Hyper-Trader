@@ -416,6 +416,25 @@ discovery:
     # the reconcile fix lands.
     # Mute check: fixed_usd $30 * 1.25 = $37.50 clip, clears min_per_trade_usd
     # $10 after floor-rounding.
+    # 2026-08-29 HELD at 1.25 — explicitly NOT bumped despite topping the
+    # backtest table (net +$105.35, sharpe +1.67, 99% hit, maxDD $0.00 @
+    # $404.94 proxy). Those numbers are the textbook false-positive signature
+    # this bot has been burned by five times, and Step-2 confirms it:
+    #   base equity $4,205.59 / gross $21,957 = 5.2x, BTC +0.283 @ 5x isol,
+    #        entry 78,391.9, unrealized -$197.52
+    #   xyz  equity $7,083.77 / gross $38,630 = 5.5x, xyz:SKHX +32.0 @ 5x isol,
+    #        entry 1,231.457, unrealized -$776.25 (-11.0% of xyz equity)
+    #   combined equity $11,289.36, net unrealized -$973.77 = -8.6% of equity
+    # 559 trades but only 95 closes: the realized +$104.58 on xyz:SKHX is
+    # winners-only and EXCLUDES the -$776.25 still open on that same symbol.
+    # maxDD $0.00 is not risk-free, it is un-realized risk.
+    # NOT a Step-2 REJECT: -8.6% is well inside the ~30%-of-equity threshold,
+    # leverage is a modest 5.2x/5.5x and both legs are ISOLATED, so the slot
+    # stays at full weight. But the 08-25 pre-commitment was "bump only on a
+    # second independent positive window on a DIFFERENT symbol" — that
+    # condition is unmet: it is still a single-symbol xyz:SKHX specialist, and
+    # the symbol is currently underwater for the leader (-2.0% vs entry) and
+    # for our mirror (xyz:SKHX -$5.68). Re-evaluate when SKHX closes out.
     "0x9551e7d4cd963558bb9882aecc74f549262e217f": 1.25
     # 2026-08-25: pinned this run (see always_follow). Weight set to 1.27,
     # which is EXACTLY where auto-sharpe weighting already had it
@@ -493,7 +512,28 @@ discovery:
     # trades (all of them, no rotation dropout), not how big each copy is.
     # Mute check: fixed_usd $30 * 1.19 = $35.70 clip, clears min_per_trade_usd
     # $10 after floor-rounding.
-    "0x511e60d32a1fdcafb46bae7f43cfab0a87040713": 1.19
+    # 2026-08-29 BUMP 1.19 -> 1.50 (+0.31, within the +/-0.5/run bound).
+    # 30d @ $404.94 proxy: 608 trades / 165 closes, 68% hit, net +$94.72,
+    # sharpe +0.22, maxDD $20.78 = 0.22x net, +$0.58/trade. KEEPER on every
+    # criterion, and the only leader in the book whose edge is DIVERSIFIED:
+    # +$94.72 spread over 36 symbols, no single name >71% of net.
+    # Step-2 clearinghouseState is CLEAN and is the reason this one gets the
+    # bump instead of the higher-sharpe 0x9551e7d4:
+    #   base equity $1,765.26 / gross $10,060 = 5.7x, unrealized -$229.84
+    #   xyz  equity $7,597.31 / gross $59,685 = 7.9x, unrealized +$844.34
+    #   combined equity $9,362.57, net unrealized +$614.50 = +6.6% of equity
+    # POSITIVE net unrealized across 16 open positions = not averaging down,
+    # not a closedPnl illusion. 165 closes is the largest close count in the
+    # book, so the sharpe is measured on real turnover rather than one trade.
+    # Sharpe +0.22 is modest by design: a 36-symbol book dilutes per-trade
+    # sharpe while cutting drawdown (maxDD is only 0.22x net).
+    # WHERE THE BUMP LANDS: xyz dex is ~capped ($478.10 of the $500
+    # max_dex_exposure_usd), so extra xyz size would mostly be skipped. This
+    # leader is the one that can use the headroom — ~$75 of its +$94.72 comes
+    # from BASE-dex names (ZEC +24.45, HYPE +14.84, ONDO +14.84, BTC +11.94,
+    # VVV +11.34, SOL +9.67, AAVE, TAO), and base gross is only $137.95.
+    # Mute check: $30 * 1.50 = $45.00 clip, clears $10 min, under $120 max.
+    "0x511e60d32a1fdcafb46bae7f43cfab0a87040713": 1.50
     # Dropped from always_follow 2026-07-20 (0 trades / dead slot).
     # "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8": 1.2
 
