@@ -161,7 +161,20 @@ discovery:
     # increase. Bump only on a second independent positive window; DROP if
     # HYPE turns and the edge was just that one trade, or if unrealized goes
     # below -30% of equity WITH gross rising (averaging down).
-    - "0xa3f996f2ec2b1fe240a57543bbfdb4d9d5804d04"
+    # DROPPED 2026-08-30: the 08-29 pre-commitment ("if it is still
+    # unfunded/flat at the next run, drop it and free the slot") fires.
+    # Step-2: perp equity $0.00 on BOTH base and xyz, ZERO positions, second
+    # consecutive run unfunded. Fill rate has collapsed: 288 fills in the last
+    # 14d but only 76 in 7d, 2 in 3d, 0 in 24h; last perp fill 2026-08-28
+    # 04:30 UTC. It pulled all perp collateral and now holds only spot
+    # (739 HYPE + illiquid memes, no USDC). Its 30d backtest is still nominally
+    # a KEEPER (net +$38.52, sharpe +0.49, maxDD $16.61 = 0.43x net, 47% hit)
+    # but 100% of that is HISTORICAL: +$38.33 of +$38.52 is HYPE, closed before
+    # it went flat. An unfunded wallet cannot generate signal, so the pin was
+    # holding a dead slot. Un-pinning also removes it from auto-discovery
+    # ($0 equity fails the $500 min_leader_equity_usd gate), which is intended.
+    # Re-add only if it refunds perp collateral AND posts a positive window.
+    # - "0xa3f996f2ec2b1fe240a57543bbfdb4d9d5804d04"
     # 2026-08-28: PINNED. Auto-discovered only, so it was trading LIVE at
     # auto-sharpe weight 1.19 while being invisible to Step-1 (backtest scores
     # always_follow only) — and it flickered in/out of selection between
@@ -435,6 +448,17 @@ discovery:
     # condition is unmet: it is still a single-symbol xyz:SKHX specialist, and
     # the symbol is currently underwater for the leader (-2.0% vs entry) and
     # for our mirror (xyz:SKHX -$5.68). Re-evaluate when SKHX closes out.
+    # 2026-08-30 HOLD at 1.25 (no change). Backtest is nominally the best
+    # sharpe in the book (531 trades / 92 closes, 99% hit, net +$78.61,
+    # sharpe +1.36, maxDD $0.00) but 99% hit with ZERO drawdown is the exact
+    # closedPnl-illusion signature Step-2 exists to catch, and +$77.84 of the
+    # +$78.61 is one symbol, xyz:SKHX. Step-2 today is BENIGN but shows the
+    # edge surface is GONE: xyz equity $0.00 with ZERO positions (the SKHX book
+    # that carried -$973.77 unrealized last run is fully closed out); the whole
+    # wallet is now one BTC long, 0.325 @ 5x isolated, base equity $4,976.48 /
+    # gross $25,375.87 = 5.1x, unrealized -$78.46 = -1.6% of equity.
+    # Not a LOSER (net>0, sharpe>0.1, maxDD<2x net) so no cut; but forward edge
+    # is unproven now that SKHX is flat, so no bump either.
     "0x9551e7d4cd963558bb9882aecc74f549262e217f": 1.25
     # 2026-08-25: pinned this run (see always_follow). Weight set to 1.27,
     # which is EXACTLY where auto-sharpe weighting already had it
@@ -506,7 +530,9 @@ discovery:
     # but costs nothing flat, and its HYPE edge is proven. WATCH: if it is
     # still unfunded/flat at the next run, drop it from always_follow and free
     # the slot rather than holding a dead pin.
-    "0xa3f996f2ec2b1fe240a57543bbfdb4d9d5804d04": 0.77
+    # 2026-08-30: DROPPED from always_follow (unfunded/dead slot, see above).
+    # Weight commented out rather than zeroed — never mute by rounding.
+    # "0xa3f996f2ec2b1fe240a57543bbfdb4d9d5804d04": 0.77
     # 2026-08-28: pinned this run (see always_follow). Weight set to 1.19 =
     # its existing auto-sharpe weight, so this pin changes WHICH cycles it
     # trades (all of them, no rotation dropout), not how big each copy is.
@@ -533,7 +559,29 @@ discovery:
     # from BASE-dex names (ZEC +24.45, HYPE +14.84, ONDO +14.84, BTC +11.94,
     # VVV +11.34, SOL +9.67, AAVE, TAO), and base gross is only $137.95.
     # Mute check: $30 * 1.50 = $45.00 clip, clears $10 min, under $120 max.
-    "0x511e60d32a1fdcafb46bae7f43cfab0a87040713": 1.50
+    # 2026-08-30 BUMP 1.50 -> 1.80 (+0.30, within the +/-0.5/run bound).
+    # SECOND consecutive positive window, improving on every measure.
+    # 30d @ $404.87 proxy: 612 trades / 164 closes, 68% hit, net +$123.91,
+    # sharpe +0.24, maxDD $26.19 = 0.21x net, +$0.76/trade.
+    #   net    +$94.72 -> +$123.91   sharpe +0.22 -> +0.24
+    #   maxDD  0.22x   -> 0.21x net  avg$   +$0.58 -> +$0.76
+    # Still the only DIVERSIFIED book we own: net spread over 36 symbols with a
+    # real loss tail (xyz:NBIS +84.0, ZEC +30.3, HYPE +18.7, ONDO +18.7, BTC
+    # +13.0, SOL +12.2 vs xyz:AAOI -24.3, xyz:SPCX -22.3), no single name >68%
+    # of net. 164 closes = the sharpe is measured on real turnover.
+    # Step-2 clearinghouseState CLEAN — this is why it gets the bump and not
+    # the higher-sharpe 0x9551e7d4:
+    #   base equity $1,785.13 / gross $10,298.69 = 5.8x, unrealized +$8.76
+    #   xyz  equity $7,792.89 / gross $59,872.05 = 7.7x, unrealized +$1,031.20
+    #   combined equity $9,578.02, net unrealized +$1,039.96 = +10.9% of equity
+    # POSITIVE net unrealized across 16 open positions, and unrealized IMPROVED
+    # (+$614.50 -> +$1,039.96) while gross barely moved = not averaging down.
+    # Held to +0.30 rather than the full +0.50 because sharpe is only +0.24 and
+    # account gross notional is already $432.62 of the $800 total cap — this is
+    # the highest-turnover leader in the book (612 trades/30d) and a larger clip
+    # would consume cap headroom and crowd out the other slot.
+    # Mute check: $30 * 1.80 = $54.00 clip, clears $10 min, under $120 max.
+    "0x511e60d32a1fdcafb46bae7f43cfab0a87040713": 1.80
     # Dropped from always_follow 2026-07-20 (0 trades / dead slot).
     # "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8": 1.2
 
