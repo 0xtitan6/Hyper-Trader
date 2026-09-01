@@ -582,6 +582,28 @@ discovery:
     # would consume cap headroom and crowd out the other slot.
     # Mute check: $30 * 1.80 = $54.00 clip, clears $10 min, under $120 max.
     "0x511e60d32a1fdcafb46bae7f43cfab0a87040713": 1.80
+    # 2026-09-01 AUTO-DISCOVERED leader, NOT pinned. Explicit weight override to
+    # cut its auto-Sharpe weight 1.32 -> 0.85 (-0.47, within the +/-0.5/run bound).
+    # It has been trading LIVE since ~08-31 on zero backtest evidence, because
+    # src/backtest.py only scores always_follow — so this run backtested it in
+    # isolation via a temp config:
+    #   30d @ $411.21 proxy: 275 trades / 153 closes, 64% hit, net +$91.05,
+    #   sharpe +0.87, maxDD $5.71 = 0.06x net. Looks like the best book we own.
+    # STEP-2 clearinghouseState REJECTS the add:
+    #   base equity $1,035.84 / gross $10,329.93 = 10.0x leverage (the max),
+    #   ONE position — HYPE short 123.21 — unrealized -$330.25 = -31.9% of equity.
+    #   xyz $0 / para $0.
+    # That is the textbook closedPnl illusion: 100% of the +$91.05 realized net
+    # is HYPE, and it is now sitting on an open HYPE loss 3.6x larger than its
+    # entire 30d realized net, at max leverage, on a single name. Realized maxDD
+    # of $5.71 is meaningless when the drawdown is being warehoused unrealized.
+    # Sixth false positive of this exact shape (0xe2823659 et al).
+    # NOT muted deliberately: $30 * 0.85 = $25.50 clip, clears $10 min after
+    # floor-rounding. Reduced, not silenced — its realized turnover (153 closes,
+    # 64% hit) is real, so this is a size cut on unrealized-risk evidence, not a
+    # LOSER cut. If the HYPE short is closed at a loss it will show up in the
+    # next window's net$ and can be cut properly then.
+    "0x9636dc553bb96c4870529af4c60f6701fab001dd": 0.85
     # Dropped from always_follow 2026-07-20 (0 trades / dead slot).
     # "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8": 1.2
 
