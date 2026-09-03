@@ -603,7 +603,38 @@ discovery:
     # Sizing to the evidence, not cutting the slot. Re-bump only on a window
     # with sharpe back above ~0.2 AND maxDD back under ~0.3x net.
     # Mute check: $30 * 1.50 = $45.00 clip, clears $10 min, under $120 max.
-    "0x511e60d32a1fdcafb46bae7f43cfab0a87040713": 1.50
+    # 2026-09-03 TRIMMED 1.50 -> 1.10 (-0.40, within the +/-0.5/run bound).
+    # THIRD consecutive window of monotonic risk-adjusted decay, and the
+    # 09-02 re-bump condition ("sharpe back above ~0.2 AND maxDD back under
+    # ~0.3x net") was not met — every measure moved the wrong way instead.
+    # 30d @ $397.84 proxy: 654 trades / 169 closes, 64% hit, net +$61.25,
+    # sharpe +0.11, maxDD $50.53 = 0.83x net, +$0.37/trade.
+    #   net    +$123.91 -> +$104.88 -> +$94.86 -> +$61.25  (-35% this window)
+    #   sharpe    +0.24 ->    +0.15 ->   +0.14 ->   +0.11  (lowest ever, and
+    #                                    barely above the 0.1 KEEPER floor)
+    #   maxDD/net 0.21x ->    0.57x ->   0.64x ->   0.83x  (4x worse than 08-30)
+    # NOT a LOSER cut — net>0, sharpe>0.1, maxDD<2x net, so the slot stays.
+    # Step-2 clearinghouseState is CLEAN and is why this is a size trim rather
+    # than a drop: base $1,406.23 eq / $11,216.30 gross = 8.0x, unrealized
+    # -$26.14 (-1.9%); xyz $7,372.79 eq / $71,144.71 gross = 9.6x, unrealized
+    # +$1,058.66 (+14.4%); para $176.44 eq / $1,033.19 gross = 5.9x, +$38.47
+    # (+21.8%). Combined equity $8,955.46, net unrealized +$1,070.99 = +12.0%
+    # of equity across 20 open positions. POSITIVE and spread wide = not
+    # averaging down, not a closedPnl illusion.
+    # WHY IT IS STILL THE RIGHT DOLLAR TO CUT: maxDD $50.53 is 12.7% of the
+    # $397.84 account and dwarfs the rest of the book combined (0x9551e7d4
+    # $0.27, 0x9636dc55 $3.68). We are paying 12.7% of account drawdown for
+    # sharpe +0.11 on the highest-turnover leader we copy (654 trades/30d) at
+    # the largest weight in a 3-leader book. Damage stays idiosyncratic:
+    # JTO -$43.57, xyz:AAOI -$23.89, xyz:SPCX -$21.91 against xyz:NBIS +$64.85.
+    # This continues the 09-02 direction (sizing to the evidence) rather than
+    # reversing it — three windows all point the same way, so this is decay
+    # tracking, not whipsaw. Re-bump condition unchanged: sharpe back above
+    # ~0.2 AND maxDD back under ~0.3x net.
+    # Mute check: $30 * 1.10 = $33.00 clip, clears min_per_trade_usd $10 after
+    # floor-rounding and is under max_per_trade_usd $120. Real size cut, NOT a
+    # silent mute-by-rounding.
+    "0x511e60d32a1fdcafb46bae7f43cfab0a87040713": 1.10
     # 2026-09-01 AUTO-DISCOVERED leader, NOT pinned. Explicit weight override to
     # cut its auto-Sharpe weight 1.32 -> 0.85 (-0.47, within the +/-0.5/run bound).
     # It has been trading LIVE since ~08-31 on zero backtest evidence, because
