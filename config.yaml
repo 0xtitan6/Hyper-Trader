@@ -656,7 +656,40 @@ discovery:
     # 64% hit) is real, so this is a size cut on unrealized-risk evidence, not a
     # LOSER cut. If the HYPE short is closed at a loss it will show up in the
     # next window's net$ and can be cut properly then.
-    "0x9636dc553bb96c4870529af4c60f6701fab001dd": 0.85
+    # 2026-09-04: 0.85 -> 0.45 (-0.40). BOTH conditions the 09-01 note set as
+    # cut-triggers have now fired, and a third arrived.
+    # (1) THE UNREALIZED HOLE MORE THAN DOUBLED. Same single HYPE short, still
+    #     10.05x (max leverage), still the only position:
+    #       09-01  equity $1,035.84  unrealized -$330.25  = -31.9% of equity
+    #       09-04  equity $1,068.19  unrealized -$740.54  = -69.3% of equity
+    #     The short was NOT closed; the drawdown is still being warehoused where
+    #     closedPnl cannot see it. -69.3% is far past the ~30%-of-equity Step-2
+    #     reject line.
+    # (2) THE EDGE IS ONE DAY. 30d fills (388, deduped by tid) split by day of
+    #     closedPnl-minus-fees:
+    #       08-22  +$11,294.53  (143 fills)   <-- 96% of the entire 30d total
+    #       every other positive day combined: +$1,721.62 (mostly 08-13/08-07)
+    #     and EIGHT consecutive negative sessions since that one day:
+    #       08-23 -$38.86 / 08-24 -$57.95 / 08-25 -$719.71 / 08-26 -$3.90
+    #       08-31 -$15.84 / 09-01 -$174.69 / 09-02 -$260.91 / 09-03 -$17.87
+    #     Backtest net +$68.38 / sharpe +0.88 / 64% hit / maxDD $4.28 is an
+    #     artifact of 08-22. Forward-looking the book has been negative for 12d.
+    # (3) 100% single-name. Per-coin: HYPE +$10,464.63 of $11,716.71 total; the
+    #     rest is HIP-4 outcome markets (#10650 etc.) that risk.allowed_market_types
+    #     = [perp] filters out, so HYPE is our ONLY executable surface here.
+    # Cut is -0.40, inside the +/-0.5 per-run bound. NOT a mute: $30 * 0.45 =
+    # $13.50 -> HYPE szDecimals 2 -> 0.15 @ $87.07 = $13.06, clears
+    # min_per_trade_usd $10. Verified mute-safe across HYPE $60-$250 (worst case
+    # $12.00 at $200). Deliberately NOT 0.35 (the full -0.5 bound): $30 * 0.35 =
+    # $10.50 -> $10.45 today, but HYPE above ~$107 floor-rounds it under $10 and
+    # SILENTLY MUTES the leader. Never mute by rounding — if this needs to go to
+    # zero, drop it explicitly.
+    # NOTE: this leader is AUTO-DISCOVERED, not in always_follow. Deleting this
+    # override does NOT remove it — src/leaders.py would fall back to auto-Sharpe
+    # weighting, clip(0.88 + 1.0) = 1.88, i.e. a 2.1x BUMP. The explicit low
+    # override IS the brake. Next run: if the HYPE short is finally closed at a
+    # loss it lands in net$ and this becomes a clean LOSER cut toward 0.
+    "0x9636dc553bb96c4870529af4c60f6701fab001dd": 0.45
     # Dropped from always_follow 2026-07-20 (0 trades / dead slot).
     # "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8": 1.2
 
