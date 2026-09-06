@@ -690,6 +690,23 @@ discovery:
     # override IS the brake. Next run: if the HYPE short is finally closed at a
     # loss it lands in net$ and this becomes a clean LOSER cut toward 0.
     "0x9636dc553bb96c4870529af4c60f6701fab001dd": 0.45
+
+    # 0xa3f996f2 PINNED 2026-09-06 at its current auto weight. It was dropped
+    # from always_follow 2026-08-30 as an unfunded dead pin ($0 equity, 0 fills);
+    # it has since REFUNDED and auto-discovery re-selected it (rank=25,
+    # pnl=$3157, 111 trades, auto weight 1.11) — so it has been trading LIVE
+    # while being INVISIBLE to Step-1, which only scores wallets that appear in
+    # always_follow or leader_weights.
+    # Backtest 30d @ $471 proxy: net +$64.79, sharpe +0.39, maxDD $33.78
+    # (0.52x net), 60% hit over 169 closes / 414 trades = KEEPER on every leg.
+    # Step-2 CLEAN: base equity $17,846.33, unrealized +$9,734.22 = +54.5% of
+    # equity (a GAIN, not a bag), 3 positions, account leverage 10.0x.
+    # This override is a BRAKE, not a bump: auto-Sharpe weighting is dynamic and
+    # can drift this leader up with no Step-2 gate, and it runs 10x with a 40x
+    # BTC leg and ~100% of its net from HYPE. Pinning 1.11 -> 1.10 caps that
+    # drift and makes the leader permanently visible to future backtests.
+    # Size change is ~1%: $30*1.10 = $33.00, well clear of min_per_trade_usd $10.
+    "0xa3f996f2ec2b1fe240a57543bbfdb4d9d5804d04": 1.10
     # Dropped from always_follow 2026-07-20 (0 trades / dead slot).
     # "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8": 1.2
 
