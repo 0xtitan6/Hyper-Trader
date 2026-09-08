@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import time
 from unittest.mock import MagicMock
 
 from src.leader_score import (
@@ -486,3 +487,106 @@ def test_load_metrics_passes_perp_only():
     assert m_full is not None and m_perp is not None
     assert m_full.total_realized_pnl_usd == 0.0  # 5+5-10
     assert m_perp.total_realized_pnl_usd == 10.0  # perp-only
+
+
+# ---------- pagination (2026-08-21) ----------
+#
+# `userFillsByTime` caps at 2,000 rows OLDEST-first. Unpaginated, scoring a
+# busy wallet saw its first ~2 days and called that the 30-day window:
+# `0x7177edd4` (30,127 trades) scored `trades=0` and was rejected as inactive
+# because its perp fills all sat past the cap. These pin that the scorer now
+# reads the whole window, and that a half-read window is UNKNOWN, not a score.
+
+
+class _PagedInfo:
+    """Mimics userFillsByTime: ascending, <= limit rows, startTime INCLUSIVE."""
+
+    def __init__(self, fills, limit=2000, fail_on_call=None):
+        self.fills = sorted(fills, key=lambda f: f["time"])
+        self.limit = limit
+        self.fail_on_call = fail_on_call
+        self.calls = 0
+
+    def post(self, _path, payload):
+        self.calls += 1
+        if self.fail_on_call == self.calls:
+            raise RuntimeError("network down")
+        start = payload["startTime"]
+        return [f for f in self.fills if f["time"] >= start][: self.limit]
+
+
+# Fills must land INSIDE the lookback window, or the fake endpoint filters them
+# out exactly like the real one does and every count reads 0.
+_NOW_MS = int(time.time() * 1000)
+
+
+def _paged_fill(offset_ms: int, coin: str = "BTC", tid: int | None = None) -> dict:
+    t_ms = _NOW_MS - 3_600_000 + offset_ms
+    f = _f(t_ms, "B", 0.0, coin)
+    f["tid"] = tid if tid is not None else t_ms
+    return f
+
+
+def test_load_metrics_reads_past_the_2000_fill_cap():
+    from src.hl_fills import HL_FILL_PAGE_LIMIT
+
+    fills = [_paged_fill(i) for i in range(HL_FILL_PAGE_LIMIT + 250)]
+    info = _PagedInfo(fills)
+    m = load_metrics(info, "0xabc", page_delay_s=0.0)
+    assert m is not None
+    assert m.trade_count == HL_FILL_PAGE_LIMIT + 250
+    assert info.calls > 1
+
+
+def test_load_metrics_sees_the_perp_fills_hidden_past_the_cap():
+    """The 0x7177edd4 regression: the visible slice is all outcome markets, so
+    a perp-only score reads 0 trades on a wallet that trades perps constantly."""
+    from src.hl_fills import HL_FILL_PAGE_LIMIT
+
+    outcomes = [_paged_fill(i, coin="#10411")
+                for i in range(HL_FILL_PAGE_LIMIT)]
+    perps = [_paged_fill(HL_FILL_PAGE_LIMIT + i, coin="xyz:UNITREE")
+             for i in range(120)]
+    m = load_metrics(_PagedInfo(outcomes + perps), "0xabc", perp_only=True,
+                     page_delay_s=0.0)
+    assert m is not None
+    assert m.trade_count == 120  # would be 0 before pagination
+
+
+def test_load_metrics_returns_none_when_a_later_page_fails():
+    """INV 4: half a window is a WRONG score, not a smaller one — and the half
+    that goes missing is always the most recent."""
+    from src.hl_fills import HL_FILL_PAGE_LIMIT
+
+    fills = [_paged_fill(i) for i in range(HL_FILL_PAGE_LIMIT + 10)]
+    info = _PagedInfo(fills, fail_on_call=2)
+    assert load_metrics(info, "0xabc", max_retries=1, page_delay_s=0.0) is None
+
+
+def test_load_metrics_returns_none_when_the_page_cap_is_exhausted():
+    """A wallet past the cap must read as UNMEASURED, never as a confident
+    low trade count — that confusion is the whole defect."""
+    from src.hl_fills import HL_FILL_PAGE_LIMIT
+
+    fills = [_paged_fill(i) for i in range(HL_FILL_PAGE_LIMIT * 3)]
+    assert load_metrics(_PagedInfo(fills), "0xabc", max_pages=2,
+                        page_delay_s=0.0) is None
+
+
+def test_load_metrics_dedupes_the_inclusive_page_boundary():
+    """startTime is inclusive, so the boundary fill comes back on both pages.
+    Counting it twice inflates trade_count and double-books its closedPnl."""
+    from src.hl_fills import HL_FILL_PAGE_LIMIT
+
+    fills = [_paged_fill(i) for i in range(HL_FILL_PAGE_LIMIT + 7)]
+    m = load_metrics(_PagedInfo(fills), "0xabc", page_delay_s=0.0)
+    assert m.trade_count == HL_FILL_PAGE_LIMIT + 7
+
+
+def test_load_metrics_short_window_still_makes_one_call():
+    """Fail-open must not become never-act (INV 4): the ordinary quiet leader
+    must not pay for the busy one."""
+    info = _PagedInfo([_paged_fill(0), _paged_fill(500)])
+    m = load_metrics(info, "0xabc", page_delay_s=0.0)
+    assert m is not None and m.trade_count == 2
+    assert info.calls == 1

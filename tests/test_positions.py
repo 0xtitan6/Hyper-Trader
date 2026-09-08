@@ -508,3 +508,275 @@ def test_reconcile_skips_already_closed_positions_in_journal(state, journal, tmp
     assert ev["zeroed"] == []
     # The state.db rows still exist (we don't delete on reconcile, just skip)
     assert state.get_position("#closed1") == (0.0, 0.0)
+
+
+# --- margin snapshot (feeds mirror's free-margin headroom guard) --------------
+
+
+def test_reconcile_captures_margin_snapshot(state, journal):
+    """Shape taken from the live account 2026-08-14 (fully margined out)."""
+    info = MagicMock()
+    info.user_state.return_value = {
+        "assetPositions": [{"position": {"coin": "JUP", "szi": "69", "entryPx": "0.5"}}],
+        "marginSummary": {
+            "accountValue": "75.21582",
+            "totalNtlPos": "381.830064",
+            "totalMarginUsed": "75.20626",
+        },
+        "withdrawable": "0.00956",
+    }
+    pt = PositionTracker(info, "0xacc", state, journal)
+    assert pt.margin_snapshot() is None  # nothing cached before the first reconcile
+    pt.reconcile_with_user_state()
+    snap = pt.margin_snapshot()
+    assert snap is not None
+    assert abs(snap.account_value_usd - 75.21582) < 1e-9
+    assert abs(snap.total_margin_used_usd - 75.20626) < 1e-9
+    # `withdrawable` wins — it already nets out open-order + maintenance margin
+    assert abs(snap.free_collateral_usd - 0.00956) < 1e-9
+    # Exposure is captured AFTER the position writes so the mirror can charge
+    # itself for anything opened since.
+    assert abs(snap.exposure_at_snapshot_usd - 34.5) < 1e-9
+    assert snap.age_s < 5.0
+
+
+def test_margin_snapshot_falls_back_to_account_value_minus_margin_used(state, journal):
+    info = MagicMock()
+    info.user_state.return_value = {
+        "assetPositions": [],
+        "marginSummary": {"accountValue": "200", "totalMarginUsed": "50"},
+    }
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    snap = pt.margin_snapshot()
+    assert snap is not None
+    assert abs(snap.free_collateral_usd - 150.0) < 1e-9
+
+
+def test_margin_snapshot_survives_malformed_margin_summary(state, journal):
+    """Garbage margin fields must not break reconcile — positions still land,
+    and the mirror simply keeps failing open."""
+    info = MagicMock()
+    info.user_state.return_value = {
+        "assetPositions": [{"position": {"coin": "#11", "szi": "10", "entryPx": "0.5"}}],
+        "marginSummary": {"accountValue": "n/a", "totalMarginUsed": "?"},
+    }
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    assert state.get_position("#11") == (10.0, 0.5)
+    assert pt.margin_snapshot() is None
+
+
+def test_reconcile_journals_free_collateral(state, journal):
+    info = MagicMock()
+    info.user_state.return_value = {
+        "assetPositions": [],
+        "marginSummary": {"accountValue": "100", "totalMarginUsed": "10"},
+        "withdrawable": "90",
+    }
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    import json
+
+    with open(journal.path) as f:
+        events = [json.loads(line) for line in f if json.loads(line)["event"] == "reconcile"]
+    assert events[0]["free_collateral_usd"] == 90.0
+    assert events[0]["account_value_usd"] == 100.0
+
+
+# --- HIP-3 builder-dex reconcile (bug found 2026-08-15) ----------------------
+# `user_state` only ever returns BASE-dex positions. Every `xyz:*` position
+# therefore looked "missing upstream" and was zeroed on every cycle: 27
+# `zeroing xyz:SP500` in a single day. Three compounding consequences — the bot
+# believed it was flat and re-opened (SP500 stacked to 7x intended size),
+# reduce_only exits looked like opens, and the per-dex exposure cap read the
+# same zeroed state so it saw ~$0 against ~$339 of real xyz risk.
+
+
+def _post_router(spot=None, dexes=None, dex_states=None, fail=()):
+    """Route info.post by payload type, like the real /info endpoint."""
+    spot = spot if spot is not None else {"balances": []}
+    dexes = dexes if dexes is not None else [{"name": "xyz"}]
+    dex_states = dex_states or {}
+
+    def _post(_path, payload):
+        t = payload.get("type")
+        if t in fail:
+            raise RuntimeError(f"{t} endpoint down")
+        if t == "spotClearinghouseState":
+            return spot
+        if t == "perpDexs":
+            return dexes
+        if t == "clearinghouseState":
+            dex = payload.get("dex")
+            if dex in fail:
+                raise RuntimeError(f"dex {dex} down")
+            return dex_states.get(dex, {"assetPositions": []})
+        return {}
+
+    return _post
+
+
+def test_reconcile_merges_hip3_dex_positions(state, journal):
+    info = MagicMock()
+    info.user_state.return_value = {
+        "assetPositions": [{"position": {"coin": "BTC", "szi": "0.1", "entryPx": "50000"}}]
+    }
+    info.post.side_effect = _post_router(
+        dex_states={
+            "xyz": {
+                "assetPositions": [
+                    {"position": {"coin": "xyz:SP500", "szi": "0.017", "entryPx": "7780"}}
+                ]
+            }
+        }
+    )
+    pt = PositionTracker(info, "0xacc", state, journal)
+    result = pt.reconcile_with_user_state()
+    assert result["BTC"] == (0.1, 50000.0)
+    assert result["xyz:SP500"] == (0.017, 7780.0)
+
+
+def test_reconcile_does_not_zero_live_hip3_position(state, journal):
+    """The actual regression: a held xyz position must survive a cycle."""
+    state.update_position("xyz:SP500", 0.017, 7780.0)
+    info = MagicMock()
+    info.user_state.return_value = {"assetPositions": []}
+    info.post.side_effect = _post_router(
+        dex_states={
+            "xyz": {
+                "assetPositions": [
+                    {"position": {"coin": "xyz:SP500", "szi": "0.017", "entryPx": "7780"}}
+                ]
+            }
+        }
+    )
+    pt = PositionTracker(info, "0xacc", state, journal)
+    result = pt.reconcile_with_user_state()
+    assert result["xyz:SP500"] == (0.017, 7780.0)
+
+
+def test_unreachable_dex_holds_state_instead_of_zeroing(state, journal):
+    """A dex we cannot read is UNKNOWN, not empty. Zeroing on a failed fetch
+    is exactly the bug — so hold local state until it answers again."""
+    state.update_position("xyz:SP500", 0.017, 7780.0)
+    info = MagicMock()
+    info.user_state.return_value = {"assetPositions": []}
+    info.post.side_effect = _post_router(fail=("xyz",))
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    assert state.get_positions()["xyz:SP500"][0] == 0.017  # held, not zeroed
+
+
+def test_perpdexs_failure_holds_all_hip3_state(state, journal):
+    """If we can't even enumerate the dexes, hold every dex position."""
+    state.update_position("xyz:SP500", 0.017, 7780.0)
+    state.update_position("flx:BTC", 1.5, 100.0)
+    info = MagicMock()
+    info.user_state.return_value = {"assetPositions": []}
+    info.post.side_effect = _post_router(fail=("perpDexs",))
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    pos = state.get_positions()
+    assert pos["xyz:SP500"][0] == 0.017
+    assert pos["flx:BTC"][0] == 1.5
+
+
+def test_closed_hip3_position_is_still_zeroed_when_dex_is_readable(state, journal):
+    """Fail-safe must not become never-zero: a readable dex that no longer
+    reports the coin means it really is closed."""
+    state.update_position("xyz:SP500", 0.017, 7780.0)
+    info = MagicMock()
+    info.user_state.return_value = {"assetPositions": []}
+    info.post.side_effect = _post_router(dex_states={"xyz": {"assetPositions": []}})
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    assert state.get_positions()["xyz:SP500"][0] == 0.0
+
+
+def test_hip3_exposure_is_visible_to_the_per_dex_cap(state, journal):
+    """The cap reads the same state — after reconcile it must see real risk."""
+    info = MagicMock()
+    info.user_state.return_value = {"assetPositions": []}
+    info.post.side_effect = _post_router(
+        dex_states={
+            "xyz": {
+                "assetPositions": [
+                    {"position": {"coin": "xyz:SP500", "szi": "-0.05", "entryPx": "7780"}}
+                ]
+            }
+        }
+    )
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    assert abs(pt.exposure_usd_for_dex("xyz") - 389.0) < 1.0
+    assert pt.exposure_usd_for_dex("") == 0.0
+
+
+# --- unified margin collateral (corrected 2026-08-15) -----------------------
+# This account settles base perps AND every HIP-3 dex against ONE spot USDC
+# balance, holding against it per position (proved to 6dp: xyz marginUsed
+# 64.424287 == spot hold 64.424287). Base `withdrawable` reads $0.00 whenever
+# no base position is open -- not "no money", just "nothing held yet" -- so
+# gating on it blocked every base-perp open while $151.78 sat available.
+
+
+def _spot(total="216.20", hold="64.42"):
+    return {"balances": [{"coin": "USDC", "total": total, "hold": hold}]}
+
+
+def test_free_collateral_uses_unencumbered_spot_usdc(state, journal):
+    info = MagicMock()
+    info.user_state.return_value = {
+        "assetPositions": [],
+        "marginSummary": {"accountValue": "0.0", "totalMarginUsed": "0.0"},
+        "withdrawable": "0.0",  # the misleading figure
+    }
+    info.post.side_effect = _post_router(spot=_spot())
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    snap = pt.margin_snapshot()
+    assert abs(snap.free_collateral_usd - 151.78) < 0.01  # not 0.0
+
+
+def test_falls_back_to_withdrawable_when_spot_unreadable(state, journal):
+    """Unknown spot must not read as broke -- fall back, don't halt."""
+    info = MagicMock()
+    info.user_state.return_value = {
+        "assetPositions": [],
+        "marginSummary": {"accountValue": "50.0", "totalMarginUsed": "10.0"},
+        "withdrawable": "40.0",
+    }
+    info.post.side_effect = _post_router(spot={"balances": []})
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    assert pt.margin_snapshot().free_collateral_usd == 40.0
+
+
+def test_malformed_usdc_balance_falls_back(state, journal):
+    info = MagicMock()
+    info.user_state.return_value = {
+        "assetPositions": [],
+        "marginSummary": {"accountValue": "50.0", "totalMarginUsed": "10.0"},
+        "withdrawable": "40.0",
+    }
+    info.post.side_effect = _post_router(
+        spot={"balances": [{"coin": "USDC", "total": "abc", "hold": "0"}]}
+    )
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    assert pt.margin_snapshot().free_collateral_usd == 40.0
+
+
+def test_fully_held_spot_reports_zero_not_negative(state, journal):
+    """hold > total (rounding/edge) must clamp at 0, never go negative."""
+    info = MagicMock()
+    info.user_state.return_value = {
+        "assetPositions": [],
+        "marginSummary": {"accountValue": "0.0", "totalMarginUsed": "0.0"},
+        "withdrawable": "0.0",
+    }
+    info.post.side_effect = _post_router(spot=_spot(total="10.0", hold="12.0"))
+    pt = PositionTracker(info, "0xacc", state, journal)
+    pt.reconcile_with_user_state()
+    assert pt.margin_snapshot().free_collateral_usd == 0.0

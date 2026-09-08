@@ -40,3 +40,39 @@ def test_build_alerter_webhook_when_url_set(cfg):
 def test_install_signal_handler_returns_unset_event():
     e = install_signal_handler()
     assert not e.is_set()
+
+
+# --- dropped-leader wiring (BACKLOG P1) ------------------------------------
+#
+# main() cannot be exercised in tests: INV 8 — the API URL comes from
+# `network.hyperliquid_env`, env vars do NOT override it, so importing and
+# running it starts a REAL SECOND LIVE ENGINE (done accidentally 2026-08-15).
+# These are source-level guards on the two things that are easy to get wrong.
+
+
+def _main_source() -> str:
+    import inspect
+
+    import src.main as m
+
+    return inspect.getsource(m.main)
+
+
+def test_dropped_leader_check_runs_at_startup_and_on_refresh():
+    src = _main_source()
+    assert 'check_dropped_leaders("startup")' in src
+    assert 'check_dropped_leaders("refresh")' in src
+
+
+def test_dropped_leader_check_is_fed_the_current_leader_set():
+    """NOT `follower.addresses`. FillFollower.follow() has no unsubscribe, so
+    that list only ever grows and can never reveal a dropped leader — feeding
+    it here would silently reproduce the bug this check exists to catch."""
+    src = _main_source()
+    import re
+
+    call = re.search(
+        r"leader_reconciler\.check_dropped_leaders\(\s*(.*?)\s*\)", src, re.S
+    )
+    assert call is not None, "check_dropped_leaders is never called"
+    assert call.group(1) == "[t.address for t in leaders]", call.group(1)

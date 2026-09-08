@@ -45,6 +45,8 @@ import urllib.request
 from collections import defaultdict
 from dataclasses import dataclass
 
+from .hl_fills import paginate_user_fills
+
 
 @dataclass
 class LeaderResult:
@@ -67,24 +69,51 @@ class LeaderResult:
 
 
 def fetch_fills(address: str, since_ms: int, max_retries: int = 4) -> list[dict]:
-    """Fetch userFillsByTime with simple exponential backoff on 429."""
-    payload = {"type": "userFillsByTime", "user": address.lower(), "startTime": since_ms}
-    body = json.dumps(payload).encode()
-    for attempt in range(max_retries):
-        try:
-            req = urllib.request.Request(
-                "https://api.hyperliquid.xyz/info",
-                data=body,
-                headers={"Content-Type": "application/json"},
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                return json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            if e.code == 429 and attempt + 1 < max_retries:
-                time.sleep(1.5 * (2**attempt))
-                continue
-            raise
-    return []
+    """Every fill since `since_ms`, paginated, with backoff on 429.
+
+    Paginated 2026-08-21. This used to be a single `userFillsByTime` call,
+    which HL caps at 2,000 rows OLDEST-first — so a "30-day" backtest of a busy
+    wallet scored its first two days. `0x7177edd4` (30,127 trades) backtested
+    at 0 trades / 0 closes / $0.00, which read as "no copyable edge" but was
+    only "we stopped reading". Shares `hl_fills.paginate_user_fills` with
+    `leader_score` on purpose: if discovery and the backtest paged differently
+    they would disagree about what a leader did, and the backtest is the thing
+    that has to be able to falsify a discovery result.
+
+    Raises on an unreadable page rather than returning a short list — a partial
+    backtest is a wrong number, not a smaller one (INV 4).
+    """
+
+    def fetch_page(start_ms: int) -> list[dict] | None:
+        payload = {
+            "type": "userFillsByTime",
+            "user": address.lower(),
+            "startTime": start_ms,
+        }
+        body = json.dumps(payload).encode()
+        for attempt in range(max_retries):
+            try:
+                req = urllib.request.Request(
+                    "https://api.hyperliquid.xyz/info",
+                    data=body,
+                    headers={"Content-Type": "application/json"},
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    return json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                if e.code == 429 and attempt + 1 < max_retries:
+                    time.sleep(1.5 * (2**attempt))
+                    continue
+                raise
+        return None
+
+    fills = paginate_user_fills(fetch_page, since_ms, label=address[:10])
+    if fills is None:
+        raise RuntimeError(
+            f"backtest: could not read a complete fill window for {address[:10]} "
+            "(see hl_fills warning); refusing to score a partial history"
+        )
+    return fills
 
 
 def is_perp(coin: str) -> bool:

@@ -1,0 +1,817 @@
+discovery:
+  period: 30d             # 24h | 7d | 30d | all — 30d so always_follow leaders inactive in past 7d still show ranked metrics
+  top_n: 4                # auto-discovered slots; 4 + 3 always_follow = 7 (HL hard cap 9)
+  min_trades: 50
+  min_volume_usd: 5000
+  min_pnl_usd: 100
+  refresh_seconds: 600
+  # Quality filter (PR #13): screens leaders by holding-time + direction consistency
+  # to catch scalpers and flip-floppers that raw PnL ranking misses.
+  use_quality_filter: true
+  score_lookback_hours: 720          # 30d — matches discovery.period to keep ranking + quality scoring on the same window
+  # Tuned 2026-05-06 from live probe: 20s + sharpe 0.1 + dir 0.55 keeps fast-but-edged
+  # perp leaders. Perp bias is critical (PR #15): HL leaderboard is dominated by
+  # HIP-4 outcome traders, and bot trades perp-only — without perp bias, leaders
+  # fire constantly but every fill gets filter-skipped on market type.
+  # 2026-08-14 RAISED 10 -> 120. Safety fix for the fixed_usd 10->30 change made
+  # the same evening. At $10 clips, high-frequency leaders were harmless: every
+  # clip floor-rounded to $9.9x, failed the $10 minimum, and was silently dropped.
+  # At $30 clips those same fills CLEAR the minimum and become real orders — and
+  # auto-discovery had already selected 0x25773676, which does ~2.43M fills/30d
+  # (~0.94/sec). That would fire tens of thousands of live $30 orders per day,
+  # churning fees against a cap that reduce-only exits keep resetting.
+  # 120s p50 blocks sub-second scalpers by ~100x while leaving our actual leaders
+  # (0x819d06c0 ~8 fills/day, 0x9551e7d4 ~22 fills/day) far above the line.
+  # Code's own default is 300s; 120 is the conservative middle.
+  min_holding_time_s: 120
+  min_sharpe: 0.1                    # require some realized edge, not just non-negative
+  min_direction_consistency: 0.55    # 0.5 = pure flip-flop
+  # 2026-05-10: relaxed back to 0.5 from 0.99. Single-leader mode produced
+  # 30+ hours of idle (rank 31 quiet on weekends, no oil session). Active
+  # quality leaders (rank 9 0x051c2e6d, rank 20 0x6cd520c1) score ~85-100%
+  # perp on 24h activity but 7d window dilutes them. 0.5 captures the active
+  # generalists while still rejecting outcome-specialists (HL leaderboard
+  # is ~60% outcome flow per 2026-05-06 probe).
+  score_perp_only: true
+  min_perp_fraction: 0.5
+  # 2026-08-15: solvency gate. A leaderboard rank is 30d HISTORY — a trader who
+  # withdrew or blew up keeps the rank while trading nothing, and we burn one of
+  # our ≤9 WS slots watching a corpse. 0x9551e7d4 held a live slot for a full day
+  # at $0 equity / $0 notional / 0 positions / last fill 19.4h old; it passed
+  # every check because 42% of its flow is xyz: perps, so min_perp_fraction was
+  # satisfied while the wallet was empty. A sweep of the top-60 leaderboard found
+  # 44 of them at ZERO perp equity, so this is the dominant failure mode.
+  # WARNING: this gate applies to AUTO-DISCOVERY ONLY. Our best leader,
+  # 0x819d06c0, holds just $30 of perp equity and WOULD be rejected by this —
+  # it survives solely because it is pinned in always_follow, which bypasses
+  # every filter. If anyone ever unpins it, this gate will silently drop the
+  # best-evidenced leader we have (sharpe 0.59, 80% hit). Unpin only together
+  # with lowering this number.
+  min_leader_equity_usd: 500.0
+  # Operator override: RWA-heavy leaders that fail the perp-bias filter
+  # (because their xyz:* tokenized-stock activity is dwarfed by their HIP-4
+  # outcome activity in raw fill counts) but who passed leader_score on their
+  # RWA-only fills. Probed 2026-05-06 against top-50 leaderboard:
+  #   - 0x8607a7d180… rank 31, $2,297, pure xyz:CL specialist
+  #     (28h median hold, sharpe 1.13, dir 1.00)
+  #   - 0x312a8bd562… rank 38, $1,997, paper-stocks basket
+  #     (1.7h median hold, sharpe 0.17, dir 0.61)
+  always_follow:
+    # PR #36 backtest 2026-05-23: simulated 30d copy-trade with our sizing —
+    # only 3 of 5 leaders had positive net edge. Dropped 0x051c2e6d
+    # (4% hit rate, Sharpe -2.30, -$1550 simulated, CHIP wrecked them)
+    # and 0xe0d28485 (24% hit rate, Sharpe -0.68, -$757 simulated).
+    # Liquidiction's aggregate PnL was misleading for both — they earn
+    # on outcomes/non-perp surfaces we don't mirror.
+    #
+    # rank 36 (was 31) — xyz:CL specialist, weekly oil session trader.
+    # DROPPED 2026-07-23: LOSER re-confirmed 4th consecutive run. 30d net
+    # +$55.83 but maxDD $429.45 (7.7x net), sharpe +0.04, 43% hit = pure
+    # offsetting noise (LIT +$392 vs SKHX -$319). Muted at 0.1 floor since
+    # 07-21 (~$1 clips skipped below min_per_trade_usd). Measurement complete —
+    # freeing HL-cap slot for quality auto-discovery. Re-add only on positive evidence.
+    # - "0x8607a7d180de23645db594d90621d837749408d5"
+    # rank 20 — recurring quality: gave us PENDLE +$1.86 on 2026-05-06.
+    # Backtest: +$60 net but Sharpe 0.04 (coin flip), kept at lower weight
+    # DROPPED 2026-08-16: LOSER 6th consecutive measurement, executing the
+    # explicit "next negative run: drop" commitment made on 08-15. 30d @ $216.51
+    # proxy: 2000 trades / 805 closes, 35% hit, net -$6.25, sharpe -0.11,
+    # maxDD $12.67 (2.0x |net|). Not a bag-holder artifact — clearinghouseState
+    # is healthy ($32.9k equity, +$811 unrealized = +2.5%, 3-10x cross), so the
+    # negative copy-edge is real, not a closedPnl illusion.
+    # The old "losses are only the xyz surface" carve-out is not actionable:
+    # this window is crypto +$4.27 / xyz -$10.52, but [discovery] has no
+    # per-surface scoping knob, so the only levers are keep-whole or drop-whole.
+    # Across 6 windows it has never held positive risk-adjusted edge; it
+    # oscillates around zero and pays fees to do it. Freeing the HL-cap slot.
+    # Re-add only on positive backtest evidence.
+    # - "0x6cd520c1a07c9b53b33d62d04d3c2a3175161968"
+    # 2026-08-14: PINNED. Best risk-adjusted leader we have ever measured —
+    # 30d backtest at $200 proxy: 1879 trades, 80% hit, sharpe +0.59,
+    # +$18.29 net, maxDD only $1.24. Was auto-discovered only, so any
+    # discovery refresh could rotate it out. Pinning protects the edge.
+    # DROPPED 2026-08-19: LOSER rule fires and the 08-18 pre-commitment
+    # ("Next negative window: drop") is executed. SECOND consecutive negative
+    # 30d window. @ $209.76 proxy: 1943 trades / 289 closes, 42% hit,
+    # net -$0.99, sharpe +0.02, maxDD $12.23 (12.3x |net|).
+    # Five-window decay is monotonic on every measure:
+    #   net    +$18.29 -> +$7.84 -> -$0.49 -> -$0.99
+    #   sharpe   +0.59 -> +0.48 -> +0.14 -> +0.04 -> +0.02
+    #   hit        80% ->   75% ->   62% ->   56% ->   42%  (BELOW coin flip)
+    # Not a closedPnl illusion in either direction — Step-2 is benign this run
+    # (base $84.12 equity / $3,603 gross = 42.8x, BTC -0.056 @ 40x isolated,
+    # unrealized only -$2.74 = -3.3%; xyz $42.55 / $308 = 7.3x, +$10.42).
+    # What Step-2 DOES show is attrition: the leader's own base equity has gone
+    # $205.39 -> $111.54 -> $84.12 in three days (-59%). It is not bag-holding,
+    # it is simply losing.
+    # The one argument that kept this slot alive through four prior cuts —
+    # "it is the only leader we have" — no longer applies: 0x9551e7d4 is now
+    # pinned and measurable. Paying $12.23 of drawdown (5.8% of account) for
+    # zero expected return is a bad trade regardless of significance.
+    # Unpinning also removes it from auto-discovery (~$127 total equity fails
+    # the $500 solvency gate), which is intended. Re-add only on positive
+    # backtest evidence.
+    # - "0x819d06c03a978a86d6884b11fbca4d228ea0d106"
+    # 2026-08-18: PINNED. Auto-discovered only (rank 43, auto-weight 1.24), so any
+    # discovery refresh could rotate it out — the same exposure that got
+    # 0x819d06c0 pinned on 08-14. It is invisible to Step-1 (backtest scores
+    # always_follow only), so it was measured with a temp config: 30d @ $224.12
+    # proxy = 747 trades / 206 closes, 80% hit, net +$70.60, sharpe +0.47,
+    # maxDD $25.95 (0.37x net). KEEPER on every criterion, and by far the best
+    # risk-adjusted evidence in the book (the pinned incumbent is at -$0.49).
+    # Step-2 clearinghouseState is CLEAN, not a closedPnl illusion:
+    # xyz equity $10,947.62, gross $53,802 = 4.9x, single 5x ISOLATED SKHX long,
+    # unrealized +$327.71 = +3.0% of equity (POSITIVE — not an averaging-down
+    # bag-holder), withdrawable $0. Base dex is $0/0 positions; per INV 1 that
+    # is normal, the wallet lives on xyz. Equity $10.9k clears the $500
+    # solvency gate ~22x.
+    # CONCENTRATION CAVEAT: this is effectively an xyz:SKHX specialist —
+    # +$59.28 of the +$70.60 is one symbol. Pinned at its existing auto-weight
+    # (no size increase) precisely because it is single-window, single-symbol
+    # evidence. Bump only on a second independent positive window on a
+    # different symbol; drop if SKHX turns and the edge was just that trade.
+    - "0x9551e7d4cd963558bb9882aecc74f549262e217f"
+    # 2026-08-25: PINNED. Auto-discovered ONLY (rank 33, auto-weight 1.27), so it
+    # was being copied LIVE with real money while invisible to Step-1 (backtest
+    # scores always_follow only) — the same blind spot that got 0x819d06c0 and
+    # 0x9551e7d4 pinned. Measured with a temp config, 30d @ $415.98 proxy:
+    #   174 trades / 84 closes, 64% hit, net +$82.04, sharpe +0.87,
+    #   maxDD $12.79 = 0.16x net, +$0.99/trade.
+    # That is the BEST risk-adjusted evidence in the book on every measure
+    # (incumbent 0x9551e7d4: sharpe +0.52, maxDD 0.31x net, +$0.56/trade).
+    # NOTE this is the first 30d window measured since 3c985cb fixed the
+    # userFillsByTime pagination bug — earlier windows silently scored ~2 days
+    # of fills, so these numbers are not comparable to pre-08-24 entries.
+    # Step-2 clearinghouseState is CLEAN — not a closedPnl illusion:
+    #   base equity $13,206.12, gross $130,862.45 = 9.9x book,
+    #   unrealized +$3,583.90 = +27.1% of equity (POSITIVE, not averaging down),
+    #   BTC +1.0 @ 40x cross (unreal +$3,401, liq $40,186 vs mark ~$80.6k =
+    #   ~50% buffer), HYPE +619.93 @ 10x cross (unreal +$183, liq $12.55).
+    #   xyz dex $0/0 positions. Equity clears the $500 solvency gate ~26x.
+    #   Hit rate 64% is NOT the implausible ~100% that flags never-realized bags.
+    # The 40x cross BTC leg is the one caution flag, but book leverage is 9.9x
+    # (vs the 66x that helped condemn 0x819d06c0) and the position is deep in
+    # profit with a ~50% liq buffer, so it trips no Step-2 reject criterion.
+    # DIVERSIFICATION: its edge is HYPE (crypto/base dex); the incumbent's is
+    # xyz:SKHX (HIP-3). Different symbol, different surface, different
+    # collateral pool — this is the first genuinely uncorrelated slot we have.
+    # CONCENTRATION CAVEAT: HYPE is +$81.53 of the +$82.04 (99% of the edge),
+    # so this is a single-symbol specialist just like the incumbent. Pinned at
+    # its EXISTING auto-weight (1.27) = rotation protection, NOT a size
+    # increase. Bump only on a second independent positive window; DROP if
+    # HYPE turns and the edge was just that one trade, or if unrealized goes
+    # below -30% of equity WITH gross rising (averaging down).
+    # DROPPED 2026-08-30: the 08-29 pre-commitment ("if it is still
+    # unfunded/flat at the next run, drop it and free the slot") fires.
+    # Step-2: perp equity $0.00 on BOTH base and xyz, ZERO positions, second
+    # consecutive run unfunded. Fill rate has collapsed: 288 fills in the last
+    # 14d but only 76 in 7d, 2 in 3d, 0 in 24h; last perp fill 2026-08-28
+    # 04:30 UTC. It pulled all perp collateral and now holds only spot
+    # (739 HYPE + illiquid memes, no USDC). Its 30d backtest is still nominally
+    # a KEEPER (net +$38.52, sharpe +0.49, maxDD $16.61 = 0.43x net, 47% hit)
+    # but 100% of that is HISTORICAL: +$38.33 of +$38.52 is HYPE, closed before
+    # it went flat. An unfunded wallet cannot generate signal, so the pin was
+    # holding a dead slot. Un-pinning also removes it from auto-discovery
+    # ($0 equity fails the $500 min_leader_equity_usd gate), which is intended.
+    # Re-add only if it refunds perp collateral AND posts a positive window.
+    # - "0xa3f996f2ec2b1fe240a57543bbfdb4d9d5804d04"
+    # 2026-08-28: PINNED. Auto-discovered only, so it was trading LIVE at
+    # auto-sharpe weight 1.19 while being invisible to Step-1 (backtest scores
+    # always_follow only) — and it flickered in/out of selection between
+    # cycles (03:04 in, 02:34 out), i.e. real rotation exposure on a leader
+    # with positive measured edge. Measured with a temp config, 30d @ $412.42
+    # proxy: 606 trades / 158 closes, 68% hit, net +$96.19, sharpe +0.23,
+    # maxDD $21.16 = 0.22x net. Step-2 CLEAN: perp equity $9,807 (base $1,753
+    # + xyz $7,906 + mkts $148) plus $11,852 spot USDC; unrealized +$834.73 =
+    # +8.5% of equity (POSITIVE, not bag-holding); lev 6.7x base / 7.8x xyz;
+    # 60 fills in 24h, newest 01:47 UTC. Edge is spread over ~35 coins
+    # (xyz:NBIS +68.5, ZEC +24.9, HYPE +15.1, ONDO +15.1, BTC +12.0, with a
+    # real loss tail) — genuinely diversified, which also hedges 0x9551e7d4's
+    # single-coin xyz:SKHX concentration. Rotation-protection pin at its
+    # EXISTING auto-weight: zero per-copy size change.
+    - "0x511e60d32a1fdcafb46bae7f43cfab0a87040713"
+    # rank 42 — SOL perp specialist. DROPPED 2026-07-20: 30d backtest = 0 trades
+    # (dead slot). Freed for auto-discovery; re-add only on positive evidence.
+    # - "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8"
+  # Per-leader sizing weights — recalibrated from PR #36 backtest evidence.
+  use_sharpe_weighting: true
+  leader_weights:
+    # Oil specialist — 2026-07-21 (3rd run): STILL no risk-adj edge. 30d net
+    # +$52.80 but maxDD $429.45 (8.1x net) = LIT +$392 vs SKHX -$322 pure
+    # offsetting noise, sharpe +0.04, 42% hit (coin flip). LOSER rule
+    # (maxDD>4x net) re-confirmed 3x. Trajectory 2.0→1.5→1.0→0.5, now 0.5→0.1
+    # (0.1 = config floor; at fixed $10 sizing this yields ~$1 clips that fall
+    # below min_per_trade_usd $10 and get skipped = effective mute).
+    # 2026-07-23: dropped from always_follow entirely — LOSER 4x confirmed
+    # (net +$55.83 / maxDD $429.45 / sharpe +0.04). Weight removed.
+    # "0x8607a7d180de23645db594d90621d837749408d5": 0.1
+    # 2026-07-20: sole real earner in cohort — 30d net +$20.69, sharpe +0.10,
+    # maxDD $22.56 (<2x net), 56% hit. Bumped 1.0 → 1.5 to concentrate on edge.
+    # 2026-07-21: edge evaporated in one day — 30d net flipped +$20.69 → -$2.33,
+    # sharpe +0.10 → -0.00, 56% → 50% hit (coin flip), maxDD $29.51. Now a LOSER
+    # (net<0). Reverse yesterday's concentration bump: 1.5 → 1.0.
+    # 2026-08-15: LOSER again, and the "it's only the xyz surface" defence is now
+    # dead. 30d @ $216 proxy: 1899 trades / 757 closes, 38% hit, net -$9.02,
+    # sharpe -0.10, maxDD $10.28 (> net). Surface split: crypto -$1.77
+    # (GRASS -8.61 alone), xyz -$7.26 — BOTH negative. The earlier read that
+    # kept this slot alive (losses confined to xyz, crypto side +$30) no longer
+    # holds on the current window, so there is nothing left to carve out.
+    # Not a measurement artifact: clearinghouseState is clean — $37.6k equity,
+    # +$710 unrealized (+1.9% of equity), 3-10x lev, last fill 4h ago. This is a
+    # healthy wallet with genuinely negative copy-edge, not a bag-holder whose
+    # closedPnl flatters it. Across 5 measurements it has never held positive
+    # risk-adjusted edge; it oscillates around zero and pays fees to do it.
+    # 1.0 -> 0.5 (the -0.5/run bound). Walking it down rather than dropping it:
+    # auto-discovery is currently surfacing nobody (min_leader_equity_usd 500
+    # rejects ~all of the leaderboard), so dropping this leaves a single-leader
+    # book. Halves the bleed, keeps the slot measurable. Next negative run: drop.
+    # Mute check: fixed_usd $30 * 0.5 = $15 clip, clears min_per_trade_usd $10
+    # after floor-rounding — this is a real cut, NOT a silent mute.
+    # 2026-08-16: dropped from always_follow (LOSER 6x, net -$6.25 / sharpe
+    # -0.11 / 35% hit @ $216.51 proxy). Weight removed with it — an explicit
+    # drop, NOT a mute-by-rounding.
+    # "0x6cd520c1a07c9b53b33d62d04d3c2a3175161968": 0.5
+    # 2026-08-14: concentrate on the sharpe leader (0.59 vs 0.26). Auto-weighting
+    # had it at 1.36; 1.5 is a modest deliberate bump, not a new regime.
+    # 2026-08-15: 1.5 -> 2.0. Now that it actually executes (it placed ZERO
+    # orders in the 30 days before the exposure-cap fix), a fresh 30d backtest
+    # at $211 makes it strictly better than the other slot on every
+    # risk-adjusted measure: sharpe 0.48 vs 0.23, maxDD $3.23 (0.13x net) vs
+    # $10.02 (0.35x net), 75% hit vs 45%, +$0.08/trade vs +$0.04.
+    # Sizing note: at fixed_usd $30 this is a $60 clip (max_per_trade is $120).
+    # The base account is out of margin, so the extra size lands where the
+    # capacity actually is — 64% of this leader's flow is xyz:, which has its
+    # own collateral and its own $500 cap with room. +0.5 is the per-run bound
+    # the strategist works to; not exceeding it just because I'm doing it by hand.
+    # 2026-08-17: 2.0 -> 1.5. Reversing the 08-15 concentration bump. Two
+    # independent signals, both pointing the same way:
+    #   (1) Risk-adjusted edge degraded ~4x across three windows. 30d @ $218.20
+    #       proxy: 1891 trades / 344 closes, 62% hit, net +$7.84, sharpe +0.14,
+    #       maxDD $19.26. Trajectory sharpe 0.59 -> 0.48 -> 0.14; hit 80% -> 75%
+    #       -> 62%; maxDD/net 0.13x -> 0.11x -> 2.46x. Still net-POSITIVE, so
+    #       this is NOT a LOSER (maxDD $19.26 < 4x net $31.36) and it is NOT
+    #       unpinned — but it now fails the KEEPER test (maxDD > 2x net), so the
+    #       deliberate bump that assumed a 0.5 sharpe is no longer supported.
+    #   (2) Step-2 clearinghouseState is the WORST we have seen on this wallet.
+    #       base: $205.39 equity carrying $13,638.74 gross = 66.4x book leverage,
+    #       a single -0.2152 BTC short at 40x ISOLATED, -$118.05 unrealized =
+    #       -57.5% of equity, withdrawable $0.00. xyz: $80.75 equity / $2,515.35
+    #       gross = 31.2x, -$1.94 (-2.4%). The base leg alone trips two of the
+    #       three Step-2 reject criteria (unrealized loss > 30% of equity;
+    #       extreme leverage), and it reframes the closedPnl record: part of the
+    #       "edge" is simply a large BTC short that has never been realized.
+    # Cut is -0.5 = the per-run bound, so 1.5 is as far as this run can go.
+    # NOT dropping: backtest net is still positive, it is the only leader we
+    # have (auto-discovery surfaces nobody — full top-50 sweep on 08-16 failed
+    # all 27 non-pinned candidates), and the guardrail is to unpin only on clear
+    # NEGATIVE evidence. If unrealized keeps deepening or the next window goes
+    # net-negative, cut again / drop.
+    # Mute check: fixed_usd $30 * 1.5 = $45 clip, clears min_per_trade_usd $10
+    # after floor-rounding. Real size cut, NOT a silent mute-by-rounding.
+    # 2026-08-18: 1.5 -> 1.0. LOSER rule fires — the window went net-NEGATIVE,
+    # which is the exact condition the 08-17 entry pre-committed to acting on
+    # ("if unrealized keeps deepening or the next window goes net-negative,
+    # cut again / drop"). 30d @ $224.12 proxy: 1912 trades / 325 closes,
+    # 56% hit, net -$0.49, sharpe +0.04, maxDD $15.02 (30.6x |net|).
+    # Four-window decay is now unambiguous:
+    #   net   +$18.29 -> (+) -> +$7.84 -> -$0.49
+    #   sharpe  +0.59 -> +0.48 -> +0.14 -> +0.04
+    #   hit       80% ->   75% ->   62% ->   56%  (coin flip)
+    # CUT, not dropped, for two reasons. (a) The evidence is not "clear
+    # negative" — -$0.49 over 325 closes is flat-plus-fees, not a bleed, and
+    # the pin guardrail requires clear negative evidence to unpin. (b) The
+    # other half of the 08-17 trigger did NOT fire: Step-2 unrealized
+    # RECOVERED hard, base equity $111.54 with the BTC short now +$16.27
+    # (+14.6% of equity) vs -$118.05 (-57.5%) yesterday. Still 40x ISOLATED /
+    # 35x book, which is why it gets no benefit of the doubt beyond this.
+    # Next negative window: drop. Note that unpinning also removes it from
+    # discovery entirely — at ~$111 total perp equity it fails the $500
+    # solvency gate, so there is no auto-discovery fallback for this slot.
+    # Mute check: fixed_usd $30 * 1.0 = $30 clip, clears min_per_trade_usd $10
+    # after floor-rounding. Real size cut, NOT a silent mute-by-rounding.
+    # 2026-08-19: dropped from always_follow (LOSER, 2nd consecutive negative
+    # window, 42% hit). Weight removed WITH it — an explicit drop, NOT a
+    # mute-by-rounding.
+    # "0x819d06c03a978a86d6884b11fbca4d228ea0d106": 1.0
+    # 2026-08-18: pinned this run (see always_follow). Weight set to 1.25,
+    # which is where auto-weighting already had it (1.24) — this is a
+    # rotation-protection pin, NOT a size increase. "Prefer cutting losers
+    # over adding risk": the only size change this run is the -0.5 above.
+    # Mute check: fixed_usd $30 * 1.25 = $37.50 clip, clears min_per_trade_usd
+    # $10 after floor-rounding. Real size, NOT a mute-by-rounding.
+    # 2026-08-19: 1.25 -> 0.75. Backtest still reads KEEPER (net +$66.62,
+    # sharpe +0.47, 80% hit, maxDD $24.48 = 0.37x net @ $209.76 proxy) but
+    # STEP-2 NOW TRIPS THE REJECT CRITERION, and it trips on the exact symbol
+    # that IS the edge. clearinghouseState xyz: equity $18,934.10, a single
+    # xyz:SKHX long szi 110.0 @ 5x ISOLATED, unrealized -$6,380.58 =
+    # -33.7% of equity (threshold is ~30%). base is $0/0 positions (normal
+    # per INV 1; the wallet lives on xyz).
+    # This is a ONE-DAY reversal on a wallet that was clean yesterday
+    # (+$327.71 = +3.0% of a $10,947.62 equity, $53,802 gross = 4.9x), and the
+    # leader did not cut — gross went $53.8k -> $120.0k while the position moved
+    # against it. That is averaging down into a loser, i.e. precisely the
+    # martingale profile the Step-2 rule exists to catch: closes the winners
+    # (80% hit, +$55.94 of the +$66.62 net is xyz:SKHX) and holds the loser.
+    # The concentration caveat written at pin time ("drop if SKHX turns and the
+    # edge was just that trade") is now live. Our own mirror is already carrying
+    # xyz:SKHX szi +0.2140 at -$19.81, our largest single unrealized loss.
+    # CUT, not dropped: net edge is genuinely positive across two windows and
+    # non-SKHX symbols are positive too (CXMT +$7.74, SMSN +$2.94), so this is
+    # not yet "clear negative evidence". -0.5 is the per-run bound. If SKHX
+    # unrealized deepens or the next window goes net-negative: drop.
+    # NO BUMP was considered: the 08-18 pin required "a second INDEPENDENT
+    # positive window on a different symbol" before any size increase, and this
+    # 30d window overlaps the last one ~97%. It is not independent evidence.
+    # Mute check: fixed_usd $30 * 0.75 = $22.50 clip, clears min_per_trade_usd
+    # $10 after floor-rounding. Real size cut, NOT a silent mute-by-rounding.
+    # 2026-08-20: 0.75 -> 1.0. PARTIAL restore of the 08-19 cut, because the
+    # sole justification for that cut has fully reversed in the leader's own book.
+    # Step-2 clearinghouseState is now CLEAN and strongly positive:
+    #   xyz equity $20,575.29 (up from $18,934.10), a single xyz:SKHX long
+    #   szi 70.0 @ 5x ISOLATED, gross $84,357, 4.1x book leverage,
+    #   unrealized +$4,578.41 = +22.3% of equity. base $0/0 positions (normal
+    #   per INV 1; the wallet lives on xyz).
+    # The decisive fact is the SIZE PATH, not the mark. Yesterday the reject
+    # fired because gross went $53.8k -> $120.0k WHILE the position moved
+    # against it (szi 110.0, -$6,380.58 = -33.7% of equity) = averaging down.
+    # Today szi is 110.0 -> 70.0 and gross $120.0k -> $84.4k: the leader CUT
+    # into the drawdown and the position recovered. That is the opposite of the
+    # martingale profile Step-2 exists to catch, and it retroactively reframes
+    # yesterday's snapshot as a mark-to-market dip on a position that was being
+    # actively reduced, not a bag being held. Our own mirror de-risked with it
+    # (xyz:SKHX szi 0.2140 @ -$19.81 -> 0.0680 @ +$2.14).
+    # Backtest is KEEPER on every criterion, 30d @ $226.81 proxy:
+    #   868 trades / 215 closes, 80% hit, net +$52.85, sharpe +0.48,
+    #   maxDD $18.68 = 0.35x net.
+    # Two independent windows now agree on the risk-adjusted shape:
+    #   sharpe +0.47 -> +0.48, hit 80% -> 80%, maxDD/net 0.37x -> 0.35x.
+    # WHY +0.25 AND NOT +0.5 (the per-run bound):
+    #   (a) The 08-18 pin pre-committed to bumping only on "a second INDEPENDENT
+    #       positive window on a DIFFERENT symbol". That condition is still
+    #       UNMET — this 30d window overlaps the last one ~97%, and xyz:SKHX is
+    #       still +$44.70 of the +$52.85 (85% of the edge). Concentration risk
+    #       is unchanged; only the bag-holder risk cleared.
+    #   (b) This wallet has now swung -$6.4k -> +$4.6k unrealized in ONE day.
+    #       Cutting on one day's move and fully restoring on the next is
+    #       whipsaw, not evidence. A half-step tracks the resolved reject
+    #       without re-underwriting the concentration.
+    # So this is a partial reversal of a risk cut whose cause is gone, NOT a new
+    # concentration bump. Stops one notch short of the 1.25 auto-weight.
+    # Drop trigger unchanged: if SKHX unrealized turns negative >30% of equity
+    # again WITH gross rising, or the next window goes net-negative.
+    # Mute check: fixed_usd $30 * 1.0 = $30 clip, clears min_per_trade_usd $10
+    # after floor-rounding, and is well under max_per_trade_usd $120. Real
+    # size, NOT a silent mute-by-rounding.
+    # 2026-08-26: HOLD at 1.0. KEEPER on every criterion, 30d @ $435.86 proxy:
+    #   900 trades / 228 closes, 82% hit, net +$124.68, sharpe +0.50,
+    #   maxDD $40.70 = 0.33x net, +$0.55/trade.
+    # Step-2 clearinghouseState CLEAN: base equity $5,236.90, gross $25,246.42
+    #   = 4.8x book, single BTC long szi 0.31916 @ 5x ISOLATED, unrealized
+    #   +$248.66 = +4.7% of equity (positive, not averaging down), liq
+    #   $63,487.92 vs mark ~$79,168 = ~20% buffer. Clears the $500 gate 10x.
+    # NO BUMP: the 08-18 pin requires "a second INDEPENDENT positive window on a
+    #   DIFFERENT symbol". Still unmet — xyz:SKHX is +$120.21 of the +$124.68
+    #   (96% of the edge), and this window overlaps the last one ~97%.
+    # WATCH ITEM FOR THE NEXT RUN — the edge surface has gone away underneath us:
+    #   this wallet's xyz clearinghouse is now $0.00 equity / 0 positions (it was
+    #   $20,575.29 with a 70.0 xyz:SKHX long on 08-20). The leader closed the
+    #   entire SKHX book and has re-based onto BTC on the base dex. So 96% of the
+    #   measured edge comes from a trade the leader is no longer in, and the
+    #   30d window will keep reporting it for ~4 more weeks as it rolls off.
+    #   Total leader equity also fell $20.6k -> $5.2k over the window.
+    #   Do NOT cut on this alone — realized closes were profitable and Step-2 is
+    #   clean — but treat the next window as measuring a DIFFERENT strategy
+    #   (BTC directional) than the one that earned this weight. If the BTC leg
+    #   is the only contributor and it goes net-negative, drop rather than cut:
+    #   the SKHX evidence does not underwrite a BTC book.
+    # 2026-08-27: HOLD at 1.0. KEEPER on every criterion, 30d @ $431.65 proxy:
+    #   878 trades / 221 closes, 83% hit, net +$140.27, sharpe +0.73,
+    #   maxDD $23.53 = 0.17x net, +$0.64/trade. Best window this wallet has
+    #   posted (sharpe +0.50 -> +0.73, hit 82% -> 83%, maxDD/net 0.33x -> 0.17x).
+    # Step-2 clearinghouseState CLEAN: base equity $8,148.15, gross $40,424.40
+    #   = 5.0x book, single BTC long szi 0.51358 @ 5x ISOLATED, unrealized
+    #   +$114.58 = +1.4% of equity (positive, not averaging down), liq
+    #   $63,641 vs mark ~$78,700 = ~19% buffer. Clears the $500 gate 16x.
+    #   Equity also recovered $5,236.90 -> $8,148.15 over the day.
+    # THE 08-26 WATCH ITEM IS RESOLVED — IT WAS A FALSE ALARM. That entry read
+    #   xyz equity $0.00 / 0 positions as "the SKHX edge surface has gone away
+    #   underneath us" and pre-committed to treating this window as a different
+    #   (BTC directional) strategy. The raw tape says otherwise: the wallet is
+    #   still actively trading xyz:SKHX and it is still the earner —
+    #   last 7d xyz:SKHX +$7,673.98 on 57 fills, last 3d +$4,085.80 on 18.
+    #   The $0 xyz clearinghouse was a FLAT MOMENT between round trips, not an
+    #   exit from the strategy. Lesson for future runs: a zero-position
+    #   snapshot is not evidence a leader abandoned a surface — check fills
+    #   over the window before concluding an edge surface is gone.
+    #   The BTC leg has closed NOTHING (7d BTC closedPnl $0.00, n=11 fills, the
+    #   position is still open), so the "if BTC is the only contributor and it
+    #   goes net-negative, drop" trigger has no evidence either way and does
+    #   not fire.
+    # NO BUMP: the 08-18 pin still requires "a second INDEPENDENT positive
+    #   window on a DIFFERENT symbol". Still unmet — xyz:SKHX is +$135.83 of
+    #   the +$140.27 (97% of the edge) and this window overlaps the last ~97%.
+    #   Concentration is unchanged, so the evidence is stronger but not broader.
+    # Mute check: fixed_usd $30 * 1.0 = $30 clip, clears min_per_trade_usd $10
+    # after floor-rounding. Real size, NOT a silent mute-by-rounding.
+    # 2026-08-28: 1.0 -> 1.25 (+0.25). Best risk-adjusted leader we currently
+    # hold. 30d @ $412.42 proxy: 774 trades / 172 closes, 91% hit, net
+    # +$108.72, sharpe +1.10, maxDD $1.50 = 0.014x net. Step-2 CLEAN and the
+    # 91% hit is NOT the 0xe2823659 failure mode — there is no hidden
+    # unrealized bag: base equity $4,361 w/ BTC unrealized +$351.83 (+8.1%),
+    # xyz equity $7,379 w/ xyz:SKHX unrealized only -$21.45 (-0.3%), plus
+    # $21,283 spot USDC / 4,674 HYPE. Leverage 4.7x base / 5.0x xyz
+    # (moderate). Still active: 15 fills in 24h, newest 01:20 UTC.
+    # Deliberately +0.25 and NOT the full +0.5 bound: +$108.10 of the
+    # +$108.72 net is xyz:SKHX alone, and xyz is the HIP-3 surface where
+    # reconcile/leader_reconcile still zero positions each cycle (sizing and
+    # the xyz exposure cap are known-broken, fix escalated 2026-08-15 and
+    # still awaiting Titan's go). Do not size further into that surface until
+    # the reconcile fix lands.
+    # Mute check: fixed_usd $30 * 1.25 = $37.50 clip, clears min_per_trade_usd
+    # $10 after floor-rounding.
+    # 2026-08-29 HELD at 1.25 — explicitly NOT bumped despite topping the
+    # backtest table (net +$105.35, sharpe +1.67, 99% hit, maxDD $0.00 @
+    # $404.94 proxy). Those numbers are the textbook false-positive signature
+    # this bot has been burned by five times, and Step-2 confirms it:
+    #   base equity $4,205.59 / gross $21,957 = 5.2x, BTC +0.283 @ 5x isol,
+    #        entry 78,391.9, unrealized -$197.52
+    #   xyz  equity $7,083.77 / gross $38,630 = 5.5x, xyz:SKHX +32.0 @ 5x isol,
+    #        entry 1,231.457, unrealized -$776.25 (-11.0% of xyz equity)
+    #   combined equity $11,289.36, net unrealized -$973.77 = -8.6% of equity
+    # 559 trades but only 95 closes: the realized +$104.58 on xyz:SKHX is
+    # winners-only and EXCLUDES the -$776.25 still open on that same symbol.
+    # maxDD $0.00 is not risk-free, it is un-realized risk.
+    # NOT a Step-2 REJECT: -8.6% is well inside the ~30%-of-equity threshold,
+    # leverage is a modest 5.2x/5.5x and both legs are ISOLATED, so the slot
+    # stays at full weight. But the 08-25 pre-commitment was "bump only on a
+    # second independent positive window on a DIFFERENT symbol" — that
+    # condition is unmet: it is still a single-symbol xyz:SKHX specialist, and
+    # the symbol is currently underwater for the leader (-2.0% vs entry) and
+    # for our mirror (xyz:SKHX -$5.68). Re-evaluate when SKHX closes out.
+    # 2026-08-30 HOLD at 1.25 (no change). Backtest is nominally the best
+    # sharpe in the book (531 trades / 92 closes, 99% hit, net +$78.61,
+    # sharpe +1.36, maxDD $0.00) but 99% hit with ZERO drawdown is the exact
+    # closedPnl-illusion signature Step-2 exists to catch, and +$77.84 of the
+    # +$78.61 is one symbol, xyz:SKHX. Step-2 today is BENIGN but shows the
+    # edge surface is GONE: xyz equity $0.00 with ZERO positions (the SKHX book
+    # that carried -$973.77 unrealized last run is fully closed out); the whole
+    # wallet is now one BTC long, 0.325 @ 5x isolated, base equity $4,976.48 /
+    # gross $25,375.87 = 5.1x, unrealized -$78.46 = -1.6% of equity.
+    # Not a LOSER (net>0, sharpe>0.1, maxDD<2x net) so no cut; but forward edge
+    # is unproven now that SKHX is flat, so no bump either.
+    "0x9551e7d4cd963558bb9882aecc74f549262e217f": 1.25
+    # 2026-08-25: pinned this run (see always_follow). Weight set to 1.27,
+    # which is EXACTLY where auto-sharpe weighting already had it
+    # (clip(sharpe+1.0) on its realized sharpe 0.27 = 1.27). leader_weights
+    # overrides the auto weight in src/leaders.py, so this reproduces current
+    # live sizing bit-for-bit: rotation-protection pin, ZERO size change.
+    # "Prefer cutting losers over adding risk" — no size increase this run.
+    # Mute check: fixed_usd $30 * 1.27 = $38.10 clip, clears min_per_trade_usd
+    # $10 after floor-rounding and is under max_per_trade_usd $120. Real size,
+    # NOT a silent mute-by-rounding.
+    # 2026-08-27: 1.27 -> 0.77 (-0.5, the per-run bound). The 08-25 pin's own
+    # drop-trigger has fired: "DROP if HYPE turns and the edge was just that
+    # one trade." BOTH halves are now empirically confirmed.
+    # (1) THE EDGE WAS ONE DAY. HYPE perp closedPnl-minus-fees by day:
+    #       08-20  +$6,575.40  (125 fills)
+    #       08-21    -$838.93
+    #       08-22    +$246.17
+    #       08-23     -$18.30
+    #       08-25     -$18.36
+    #       08-26  -$1,923.39
+    #     30d HYPE perp is +$4,476 gross of that single 08-20 session; every
+    #     one of the six trading days SINCE sums to -$2,552.81, and the worst
+    #     day is the most recent. The 08-25 pin was measured on a window whose
+    #     entire edge was the 08-20 spike.
+    # (2) THE COPYABLE SURFACE IS WORSE THAN THE HEADLINE. We are perp-only
+    #     (risk.allowed_market_types: [perp]). Of the wallet's 30d net,
+    #     $2,575.58 comes from #-numbered outcome/HIP-4 markets we CANNOT copy
+    #     and -$0.70 from spot. Strip 08-20 out of the copyable base-perp
+    #     surface and what remains for us is NEGATIVE.
+    # Backtest this run @ $431.65 proxy: 211 trades / 117 closes, 47% hit,
+    #   net +$67.73, sharpe +0.49, maxDD $29.20 = 0.43x net. Degraded on every
+    #   measure vs the pin window (net +$82.04, sharpe +0.87, hit 64%,
+    #   maxDD 0.16x net). Hit rate is now BELOW a coin flip.
+    # Step-2: base AND xyz clearinghouse are both $0.00 equity / 0 positions.
+    #   NOT a dead slot — it is flat on perps but actively trading (34 fills
+    #   08-26) and funds from a large spot book (735.78 HYPE, +$21k of alts).
+    #   But note it now FAILS min_leader_equity_usd $500 on perp accountValue,
+    #   which is the gate src/leaders.py:214 uses; it survives in the book
+    #   ONLY because the always_follow pin bypasses that gate.
+    # WHY CUT AND NOT DROP, even though the pin said drop:
+    #   (a) The sanctioned instrument still reads KEEPER — 30d net +$67.73 > 0,
+    #       sharpe +0.49 > 0.1, maxDD 0.43x < 2x net, 211 trades. No LOSER
+    #       criterion fires. Overriding the primary scorer outright on one run
+    #       of my own re-analysis is the exact whipsaw this book has been burned
+    #       by before (see the 08-19 cut on 0x9551e7d4, falsified within a day).
+    #   (b) The adverse evidence is six trading days on one symbol. Real and
+    #       directionally clear, but thin.
+    #   (c) -0.5 is the per-run bound, so 0.77 is as far as this run can go.
+    #       A cut is reversible and keeps the slot PINNED = visible to Step-1
+    #       and under explicit weight control; a drop would hand it to a
+    #       discovery gate whose behaviour on a $0-perp-equity wallet is a
+    #       second variable I do not need to introduce in the same run.
+    # PRE-COMMITMENT, to be executed without re-litigation: if the next window
+    #   still shows base-perp net NEGATIVE once 08-20 rolls out of the 30d
+    #   window, or HYPE posts another negative week, DROP from always_follow —
+    #   do not cut again. The concentration case has already been made twice.
+    # Mute check: fixed_usd $30 * 0.77 = $23.10 clip, clears min_per_trade_usd
+    # $10 after floor-rounding and is under max_per_trade_usd $120. Real size
+    # cut, NOT a silent mute-by-rounding.
+    # 2026-08-28: HOLD at 0.77, no change. NOT a LOSER — 30d @ $412.42 proxy:
+    # 211 trades / 117 closes, 47% hit, net +$39.24, sharpe +0.49, maxDD
+    # $16.92 = 0.43x net, so no rule fires and last run's "edge was one day"
+    # cut is not repeated. But explicitly NO bump: Step-2 shows the wallet has
+    # gone DORMANT — perp equity $0.00 on BOTH base and xyz, zero positions,
+    # last perp fill 2026-08-26 16:37 UTC (Close Long HYPE), no fills in 34h.
+    # It flattened and pulled its perp collateral; only illiquid spot memes +
+    # 737 HYPE remain, no USDC. Un-copyable while unfunded (and below
+    # min_leader_equity_usd $500 — it survives discovery only via this pin),
+    # but costs nothing flat, and its HYPE edge is proven. WATCH: if it is
+    # still unfunded/flat at the next run, drop it from always_follow and free
+    # the slot rather than holding a dead pin.
+    # 2026-08-30: DROPPED from always_follow (unfunded/dead slot, see above).
+    # Weight commented out rather than zeroed — never mute by rounding.
+    # "0xa3f996f2ec2b1fe240a57543bbfdb4d9d5804d04": 0.77
+    # 2026-08-28: pinned this run (see always_follow). Weight set to 1.19 =
+    # its existing auto-sharpe weight, so this pin changes WHICH cycles it
+    # trades (all of them, no rotation dropout), not how big each copy is.
+    # Mute check: fixed_usd $30 * 1.19 = $35.70 clip, clears min_per_trade_usd
+    # $10 after floor-rounding.
+    # 2026-08-29 BUMP 1.19 -> 1.50 (+0.31, within the +/-0.5/run bound).
+    # 30d @ $404.94 proxy: 608 trades / 165 closes, 68% hit, net +$94.72,
+    # sharpe +0.22, maxDD $20.78 = 0.22x net, +$0.58/trade. KEEPER on every
+    # criterion, and the only leader in the book whose edge is DIVERSIFIED:
+    # +$94.72 spread over 36 symbols, no single name >71% of net.
+    # Step-2 clearinghouseState is CLEAN and is the reason this one gets the
+    # bump instead of the higher-sharpe 0x9551e7d4:
+    #   base equity $1,765.26 / gross $10,060 = 5.7x, unrealized -$229.84
+    #   xyz  equity $7,597.31 / gross $59,685 = 7.9x, unrealized +$844.34
+    #   combined equity $9,362.57, net unrealized +$614.50 = +6.6% of equity
+    # POSITIVE net unrealized across 16 open positions = not averaging down,
+    # not a closedPnl illusion. 165 closes is the largest close count in the
+    # book, so the sharpe is measured on real turnover rather than one trade.
+    # Sharpe +0.22 is modest by design: a 36-symbol book dilutes per-trade
+    # sharpe while cutting drawdown (maxDD is only 0.22x net).
+    # WHERE THE BUMP LANDS: xyz dex is ~capped ($478.10 of the $500
+    # max_dex_exposure_usd), so extra xyz size would mostly be skipped. This
+    # leader is the one that can use the headroom — ~$75 of its +$94.72 comes
+    # from BASE-dex names (ZEC +24.45, HYPE +14.84, ONDO +14.84, BTC +11.94,
+    # VVV +11.34, SOL +9.67, AAVE, TAO), and base gross is only $137.95.
+    # Mute check: $30 * 1.50 = $45.00 clip, clears $10 min, under $120 max.
+    # 2026-08-30 BUMP 1.50 -> 1.80 (+0.30, within the +/-0.5/run bound).
+    # SECOND consecutive positive window, improving on every measure.
+    # 30d @ $404.87 proxy: 612 trades / 164 closes, 68% hit, net +$123.91,
+    # sharpe +0.24, maxDD $26.19 = 0.21x net, +$0.76/trade.
+    #   net    +$94.72 -> +$123.91   sharpe +0.22 -> +0.24
+    #   maxDD  0.22x   -> 0.21x net  avg$   +$0.58 -> +$0.76
+    # Still the only DIVERSIFIED book we own: net spread over 36 symbols with a
+    # real loss tail (xyz:NBIS +84.0, ZEC +30.3, HYPE +18.7, ONDO +18.7, BTC
+    # +13.0, SOL +12.2 vs xyz:AAOI -24.3, xyz:SPCX -22.3), no single name >68%
+    # of net. 164 closes = the sharpe is measured on real turnover.
+    # Step-2 clearinghouseState CLEAN — this is why it gets the bump and not
+    # the higher-sharpe 0x9551e7d4:
+    #   base equity $1,785.13 / gross $10,298.69 = 5.8x, unrealized +$8.76
+    #   xyz  equity $7,792.89 / gross $59,872.05 = 7.7x, unrealized +$1,031.20
+    #   combined equity $9,578.02, net unrealized +$1,039.96 = +10.9% of equity
+    # POSITIVE net unrealized across 16 open positions, and unrealized IMPROVED
+    # (+$614.50 -> +$1,039.96) while gross barely moved = not averaging down.
+    # Held to +0.30 rather than the full +0.50 because sharpe is only +0.24 and
+    # account gross notional is already $432.62 of the $800 total cap — this is
+    # the highest-turnover leader in the book (612 trades/30d) and a larger clip
+    # would consume cap headroom and crowd out the other slot.
+    # Mute check: $30 * 1.80 = $54.00 clip, clears $10 min, under $120 max.
+    # 2026-09-02 TRIMMED 1.80 -> 1.50 (-0.30). Still a KEEPER by the rule
+    # (30d @ $400.13 proxy: 649 trades / 172 closes, 65% hit, net +$94.86,
+    # sharpe +0.14, maxDD $60.81 = 0.64x net) and Step-2 is CLEAN — base
+    # $1,700.64 eq / $11,124 gross = 6.5x with unrealized +$181.90 (+10.7%),
+    # xyz $6,629.02 eq / $66,516 gross = 10.0x with unrealized +$347.61
+    # (+5.2%), para $133.55 / -$6.36. Net unrealized POSITIVE, so this is not
+    # a closedPnl illusion and NOT a LOSER cut.
+    # It is a give-back of the 08-31 bump, whose evidence no longer holds.
+    # Risk-adjusted quality has decayed two consecutive windows:
+    #   net    +$94.72 -> +$123.91 -> +$104.88 -> +$94.86
+    #   sharpe   +0.22 ->   +0.24  ->   +0.15  ->  +0.14  (lowest ever measured)
+    #   maxDD    0.22x ->   0.21x  ->   0.57x  ->  0.64x  of net (3x worse)
+    # Net is back where it sat when this leader carried weight 1.19-1.50; the
+    # 1.80 slot was awarded on net +$123.91 / sharpe +0.24, which is gone.
+    # Damage is idiosyncratic, not market-wide: JTO -$52.59, xyz:AAOI -$28.60,
+    # xyz:SPCX -$26.45 against xyz:NBIS +$99.10 — one symbol carries the book.
+    # It also remains the highest-turnover leader we copy (649 trades/30d) and
+    # the single largest weight in a 3-leader book, so paying 0.64x of net in
+    # drawdown for sharpe +0.14 is the worst risk-adjusted dollar we spend.
+    # Sizing to the evidence, not cutting the slot. Re-bump only on a window
+    # with sharpe back above ~0.2 AND maxDD back under ~0.3x net.
+    # Mute check: $30 * 1.50 = $45.00 clip, clears $10 min, under $120 max.
+    # 2026-09-03 TRIMMED 1.50 -> 1.10 (-0.40, within the +/-0.5/run bound).
+    # THIRD consecutive window of monotonic risk-adjusted decay, and the
+    # 09-02 re-bump condition ("sharpe back above ~0.2 AND maxDD back under
+    # ~0.3x net") was not met — every measure moved the wrong way instead.
+    # 30d @ $397.84 proxy: 654 trades / 169 closes, 64% hit, net +$61.25,
+    # sharpe +0.11, maxDD $50.53 = 0.83x net, +$0.37/trade.
+    #   net    +$123.91 -> +$104.88 -> +$94.86 -> +$61.25  (-35% this window)
+    #   sharpe    +0.24 ->    +0.15 ->   +0.14 ->   +0.11  (lowest ever, and
+    #                                    barely above the 0.1 KEEPER floor)
+    #   maxDD/net 0.21x ->    0.57x ->   0.64x ->   0.83x  (4x worse than 08-30)
+    # NOT a LOSER cut — net>0, sharpe>0.1, maxDD<2x net, so the slot stays.
+    # Step-2 clearinghouseState is CLEAN and is why this is a size trim rather
+    # than a drop: base $1,406.23 eq / $11,216.30 gross = 8.0x, unrealized
+    # -$26.14 (-1.9%); xyz $7,372.79 eq / $71,144.71 gross = 9.6x, unrealized
+    # +$1,058.66 (+14.4%); para $176.44 eq / $1,033.19 gross = 5.9x, +$38.47
+    # (+21.8%). Combined equity $8,955.46, net unrealized +$1,070.99 = +12.0%
+    # of equity across 20 open positions. POSITIVE and spread wide = not
+    # averaging down, not a closedPnl illusion.
+    # WHY IT IS STILL THE RIGHT DOLLAR TO CUT: maxDD $50.53 is 12.7% of the
+    # $397.84 account and dwarfs the rest of the book combined (0x9551e7d4
+    # $0.27, 0x9636dc55 $3.68). We are paying 12.7% of account drawdown for
+    # sharpe +0.11 on the highest-turnover leader we copy (654 trades/30d) at
+    # the largest weight in a 3-leader book. Damage stays idiosyncratic:
+    # JTO -$43.57, xyz:AAOI -$23.89, xyz:SPCX -$21.91 against xyz:NBIS +$64.85.
+    # This continues the 09-02 direction (sizing to the evidence) rather than
+    # reversing it — three windows all point the same way, so this is decay
+    # tracking, not whipsaw. Re-bump condition unchanged: sharpe back above
+    # ~0.2 AND maxDD back under ~0.3x net.
+    # Mute check: $30 * 1.10 = $33.00 clip, clears min_per_trade_usd $10 after
+    # floor-rounding and is under max_per_trade_usd $120. Real size cut, NOT a
+    # silent mute-by-rounding.
+    "0x511e60d32a1fdcafb46bae7f43cfab0a87040713": 1.10
+    # 2026-09-01 AUTO-DISCOVERED leader, NOT pinned. Explicit weight override to
+    # cut its auto-Sharpe weight 1.32 -> 0.85 (-0.47, within the +/-0.5/run bound).
+    # It has been trading LIVE since ~08-31 on zero backtest evidence, because
+    # src/backtest.py only scores always_follow — so this run backtested it in
+    # isolation via a temp config:
+    #   30d @ $411.21 proxy: 275 trades / 153 closes, 64% hit, net +$91.05,
+    #   sharpe +0.87, maxDD $5.71 = 0.06x net. Looks like the best book we own.
+    # STEP-2 clearinghouseState REJECTS the add:
+    #   base equity $1,035.84 / gross $10,329.93 = 10.0x leverage (the max),
+    #   ONE position — HYPE short 123.21 — unrealized -$330.25 = -31.9% of equity.
+    #   xyz $0 / para $0.
+    # That is the textbook closedPnl illusion: 100% of the +$91.05 realized net
+    # is HYPE, and it is now sitting on an open HYPE loss 3.6x larger than its
+    # entire 30d realized net, at max leverage, on a single name. Realized maxDD
+    # of $5.71 is meaningless when the drawdown is being warehoused unrealized.
+    # Sixth false positive of this exact shape (0xe2823659 et al).
+    # NOT muted deliberately: $30 * 0.85 = $25.50 clip, clears $10 min after
+    # floor-rounding. Reduced, not silenced — its realized turnover (153 closes,
+    # 64% hit) is real, so this is a size cut on unrealized-risk evidence, not a
+    # LOSER cut. If the HYPE short is closed at a loss it will show up in the
+    # next window's net$ and can be cut properly then.
+    # 2026-09-04: 0.85 -> 0.45 (-0.40). BOTH conditions the 09-01 note set as
+    # cut-triggers have now fired, and a third arrived.
+    # (1) THE UNREALIZED HOLE MORE THAN DOUBLED. Same single HYPE short, still
+    #     10.05x (max leverage), still the only position:
+    #       09-01  equity $1,035.84  unrealized -$330.25  = -31.9% of equity
+    #       09-04  equity $1,068.19  unrealized -$740.54  = -69.3% of equity
+    #     The short was NOT closed; the drawdown is still being warehoused where
+    #     closedPnl cannot see it. -69.3% is far past the ~30%-of-equity Step-2
+    #     reject line.
+    # (2) THE EDGE IS ONE DAY. 30d fills (388, deduped by tid) split by day of
+    #     closedPnl-minus-fees:
+    #       08-22  +$11,294.53  (143 fills)   <-- 96% of the entire 30d total
+    #       every other positive day combined: +$1,721.62 (mostly 08-13/08-07)
+    #     and EIGHT consecutive negative sessions since that one day:
+    #       08-23 -$38.86 / 08-24 -$57.95 / 08-25 -$719.71 / 08-26 -$3.90
+    #       08-31 -$15.84 / 09-01 -$174.69 / 09-02 -$260.91 / 09-03 -$17.87
+    #     Backtest net +$68.38 / sharpe +0.88 / 64% hit / maxDD $4.28 is an
+    #     artifact of 08-22. Forward-looking the book has been negative for 12d.
+    # (3) 100% single-name. Per-coin: HYPE +$10,464.63 of $11,716.71 total; the
+    #     rest is HIP-4 outcome markets (#10650 etc.) that risk.allowed_market_types
+    #     = [perp] filters out, so HYPE is our ONLY executable surface here.
+    # Cut is -0.40, inside the +/-0.5 per-run bound. NOT a mute: $30 * 0.45 =
+    # $13.50 -> HYPE szDecimals 2 -> 0.15 @ $87.07 = $13.06, clears
+    # min_per_trade_usd $10. Verified mute-safe across HYPE $60-$250 (worst case
+    # $12.00 at $200). Deliberately NOT 0.35 (the full -0.5 bound): $30 * 0.35 =
+    # $10.50 -> $10.45 today, but HYPE above ~$107 floor-rounds it under $10 and
+    # SILENTLY MUTES the leader. Never mute by rounding — if this needs to go to
+    # zero, drop it explicitly.
+    # NOTE: this leader is AUTO-DISCOVERED, not in always_follow. Deleting this
+    # override does NOT remove it — src/leaders.py would fall back to auto-Sharpe
+    # weighting, clip(0.88 + 1.0) = 1.88, i.e. a 2.1x BUMP. The explicit low
+    # override IS the brake. Next run: if the HYPE short is finally closed at a
+    # loss it lands in net$ and this becomes a clean LOSER cut toward 0.
+    "0x9636dc553bb96c4870529af4c60f6701fab001dd": 0.45
+
+    # 0xa3f996f2 PINNED 2026-09-06 at its current auto weight. It was dropped
+    # from always_follow 2026-08-30 as an unfunded dead pin ($0 equity, 0 fills);
+    # it has since REFUNDED and auto-discovery re-selected it (rank=25,
+    # pnl=$3157, 111 trades, auto weight 1.11) — so it has been trading LIVE
+    # while being INVISIBLE to Step-1, which only scores wallets that appear in
+    # always_follow or leader_weights.
+    # Backtest 30d @ $471 proxy: net +$64.79, sharpe +0.39, maxDD $33.78
+    # (0.52x net), 60% hit over 169 closes / 414 trades = KEEPER on every leg.
+    # Step-2 CLEAN: base equity $17,846.33, unrealized +$9,734.22 = +54.5% of
+    # equity (a GAIN, not a bag), 3 positions, account leverage 10.0x.
+    # This override is a BRAKE, not a bump: auto-Sharpe weighting is dynamic and
+    # can drift this leader up with no Step-2 gate, and it runs 10x with a 40x
+    # BTC leg and ~100% of its net from HYPE. Pinning 1.11 -> 1.10 caps that
+    # drift and makes the leader permanently visible to future backtests.
+    # Size change is ~1%: $30*1.10 = $33.00, well clear of min_per_trade_usd $10.
+    "0xa3f996f2ec2b1fe240a57543bbfdb4d9d5804d04": 1.10
+    # 2026-09-08 AUTO-DISCOVERED leader, NOT pinned. Explicit weight override to
+    # cut its auto-Sharpe weight 1.16 -> 0.70 (-0.46, within the +/-0.5/run bound).
+    # Same blind spot as 0x9636dc55/0xa3f996f2: it has been trading LIVE at 1.16
+    # -- the second-largest weight in the book -- on ZERO backtest evidence,
+    # because src/backtest.py only scores always_follow. main.log showed it top
+    # of every "Selected 4/50" line (rank=14, pnl=$7531, trades=58). Backtested
+    # in isolation this run via a temp config:
+    #   30d @ $472.26 proxy: 186 trades / 94 closes, 54% hit, net +$7.22,
+    #   sharpe +0.27, maxDD $1.42 = 0.20x net, +$0.08/trade.
+    # STEP-2 IS CLEAN -- this is NOT a bag-holder: xyz equity $2,498.22, ONE
+    # position (xyz:SP500 short 3.25 @ 7706.715), unrealized -$5.80 = -0.2% of
+    # equity, 10.0x. base/para/io all flat. Funded, solvent, nothing warehoused.
+    # WHY CUT ANYWAY -- it is a KEEPER by the letter of Step-3 (net>0, sharpe
+    # 0.27>0.1, maxDD 0.20x<2x net) but the MAGNITUDE does not justify a
+    # top-weight slot. At essentially the same weight, peers earn 9-15x more:
+    #   0x511e60d3  1.10 -> +$109.55      0xa3f996f2  1.10 -> +$64.19
+    #   0x7d7c7d28  1.16 -> +$7.22   (= $0.24/day, below the noise floor)
+    # And the $7,531 leaderboard PnL that WON it the 1.16 auto-weight is stale
+    # and concentrated: 08-13 +$3,701, 08-14 +$2,199, 08-24 +$2,072, 08-15
+    # +$1,631 = 103.5% of its 30d total from four days, with 09-02 -$428.98 and
+    # the whole of September ~flat. Auto-Sharpe weighting cannot see either the
+    # day-concentration or the thin copy-edge, so it sizes on a stale spike.
+    # This is a size-right, NOT a LOSER cut -- the slot stays and the leader
+    # keeps trading. Keeping the explicit entry is also the only brake: like
+    # 0x9636dc55, DELETING this line does not remove the leader, src/leaders.py
+    # falls back to auto-Sharpe and it BUMPS straight back to ~1.16.
+    # Mute check: $30 * 0.70 = $21.00 clip. Verified against real szDecimals=3
+    # after floor-rounding: xyz:SP500 @ $7,708.45 -> 0.003 = $23.13 (0.002 =
+    # $15.42 worst case), xyz:SKHX @ $1,385.65 -> 0.015 = $20.78. Both clear
+    # min_per_trade_usd $10 and sit under max_per_trade_usd $120. Reduced, NOT
+    # silently muted by rounding.
+    # Re-bump condition: net$ back above ~$50/30d with sharpe >=0.2, driven by
+    # days OUTSIDE the 08-13..08-24 spike. If net goes negative next window it
+    # is a clean LOSER cut toward 0.
+    "0x7d7c7d28e2061b30887c94b0623ed49c59f6d19c": 0.70
+    # Dropped from always_follow 2026-07-20 (0 trades / dead slot).
+    # "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8": 1.2
+
+sizing:
+  mode: fixed             # 2026-07-05: proportional→fixed per Neil "shoot $10 orders"
+  proportional_fraction: 0.05
+  fixed_usd: 30           # 2026-08-14: 10→30 for the $1,000 mission (see risk: block)
+  max_per_trade_usd: 120          # 2026-08-14: 50→120, in step with fixed_usd 10→30
+  min_per_trade_usd: 10           # HL enforces $10 min on perp orders too (e.g. asset=214 ZEC); was 1, kept rejecting fills
+  outcome_min_per_trade_usd: 10   # HL HIP-4 enforces $10 USDH min order value
+  ioc_slippage_bps: 50    # 0.5% slippage on IOC limit price; range [0, 1000]
+  # PR #19: funding-aware sizing. When mirroring perps, factor in current
+  # funding rate. Above amplify_threshold (favorable, we get paid funding) →
+  # boost size linearly to amplify_cap. Below skip_threshold (we'd PAY a lot
+  # of funding) → skip the trade. Outcomes ignored (settle once at expiry).
+  use_funding_aware_sizing: true
+  funding_amplify_threshold_apr_pct: 20.0   # below this favorable APR: no boost
+  funding_amplify_cap: 1.5                  # max 1.5x size on extreme positive funding
+  funding_skip_threshold_apr_pct: 100.0     # above this adverse APR: skip the trade
+
+risk:
+  dry_run: false
+  # 2026-08-14: Neil set the $1,000-by-Aug-31 mission and reaffirmed twice
+  # ("I don't care how"). Amplifying the ONLY edge we have evidence for (the
+  # copy strategy) by raising gross exposure 350→800 (~4x book on $200.80).
+  # Scales the 30d backtest run rate (+25.2%/mo, itself an UPPER BOUND) by
+  # 2.29x, and scales portfolio maxDD to ~12% of account. This does NOT reach
+  # $1,000 — projects ~$260 by Aug 31. Revert values in /tmp/config.yaml.bak-2240.
+  max_total_exposure_usd: 800
+  # 2026-08-15: per-BUILDER-DEX gross cap, separate from the base cap above.
+  # Each HIP-3 dex settles against its own collateral, so one shared number was
+  # charging xyz: orders for base-account risk: 40 of 40 blocked opens in a 4h
+  # window were xyz (39 of them xyz:SP500 = 64% of our best leader's flow),
+  # while base ran 2.4x maintenance coverage and xyz ran 14.6x. We were
+  # throttling the safest, best-performing book we have.
+  # Sizing: xyz held $308 gross on $61.48 equity with $4.20 maintenance
+  # (~1.4% maint rate). At $500 gross, maintenance is ~$7 and coverage is still
+  # ~8.8x, versus 2.4x on base. Headroom to grow the surface that works,
+  # without letting it run unbounded.
+  max_dex_exposure_usd: 500
+  # Raised 30→80 in step with size: at 4x book the old $30 breaker would trip
+  # on routine variance and halt trading. $80 = ~40% of account in one day.
+  max_daily_loss_usd: 80
+  allowed_market_types: [perp]   # outcome | perp | spot — perp-only this run (no USDH balance for outcomes)
+  kill_switch_file: ./KILL
+  # PR #30 auto-close: validated 2026-05-21 — WLD orphan correctly detected,
+  # detection logic + closing path both work. Switching from alert-only to
+  # autonomous close so we don't need operator hand-holding on each event.
+  leader_exit_auto_close: true
+  leader_exit_debounce_cycles: 2
+  # Manual positions opened outside the bot. LeaderReconciler skips these so
+  # operator-managed trades don't get flagged as orphans + auto-closed.
+  # Match exactly (case-insensitive).
+  manual_holdings:
+    - "#1420"      # 2026 NBA Finals — Spurs side (manual outcome bet)
+    - "#1430"      # NBA Finals Game 1 — Spurs side (manual outcome bet)
+    - "xyz:SPCX"   # SpaceX long on xyz builder dex (manual HIP-3 trade)
+
+network:
+  hyperliquid_env: mainnet
+  liquidiction_base: https://liquidiction.xyz
+
+ops:
+  state_db: ./state/state.db
+  journal_path: ./state/journal.jsonl
+  log_level: INFO
+  log_json: false
+  # 120s was triggering on routine HL connection cycles; 300s keeps real
+  # disconnect signals while cutting the spam (raised 2026-05-10 after
+  # /start enabled bot alerts to Telegram).
+  ws_stale_threshold_s: 300
+  alert_min_level: error  # info | warn | error | critical — bumped 2026-05-10
+                          # to suppress routine WS-stale "warn" events.

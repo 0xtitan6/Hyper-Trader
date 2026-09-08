@@ -100,12 +100,19 @@ def market_meta() -> MarketMeta:
 
 @pytest.fixture
 def outcome_fill() -> dict:
+    # `startPosition` was missing from this fixture until 2026-08-15, which is
+    # part of how the mirror shipped without ever reading it. Real HL fills
+    # always carry it (0 absent in the last 2,000 fills of leader 0x819d06c0),
+    # and the mirror now refuses to trade a fill it cannot classify. "0" =
+    # leader entering from flat, which is what every test using this expects.
     return {
         "tid": 1001,
         "coin": "#11",
         "px": "0.54",
         "sz": "100",
         "side": "B",
+        "startPosition": "0",
+        "dir": "Open Long",
         "time": 1714000000000,
         "fee": "0.05",
         "closedPnl": "0",

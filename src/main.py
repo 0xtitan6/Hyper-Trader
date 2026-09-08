@@ -1,5 +1,6 @@
 import argparse
 import logging
+import os
 import signal
 import sys
 import threading
@@ -15,7 +16,7 @@ from .connection import ConnectionHealth
 from .errors import PreflightError
 from .follower import FillFollower
 from .funding_history import FundingHistory
-from .leader_reconcile import LeaderReconciler
+from .leader_reconcile import STATUS_DROPPED, LeaderReconciler
 from .pref_client import PrefClient
 from .thesis import ThesisCache
 from .thesis_generator import ThesisGenerator
@@ -101,7 +102,11 @@ def main(argv: list[str] | None = None) -> int:
     # Register HIP-3 builder-deployed perp dexes (xyz, flx, vntl, etc.) so
     # Exchange.order("xyz:NVDA", ...) resolves. Same patch pattern as
     # outcomes — SDK's Info() defaults to original dex only.
-    n_hip3 = register_hip3_dexes(info)
+    # market_meta is passed so the builder dexes' szDecimals reach the rounder.
+    # MarketMeta.load() only sees the original perp dex; without this hand-off
+    # the rounder has no szDecimals for `xyz:*` and (since 2026-08) refuses to
+    # build those orders rather than guessing 4dp and poisoning the coin.
+    n_hip3 = register_hip3_dexes(info, market_meta=market_meta)
     log.info("Registered %d HIP-3 perp assets for trading", n_hip3)
 
     state = State(cfg.ops.state_db)
@@ -113,7 +118,14 @@ def main(argv: list[str] | None = None) -> int:
     # Exchange spawns its own internal Info — patch THAT too, otherwise
     # exchange.order("#NN", ...) still fails despite our outer info patch.
     register_outcome_assets(exchange.info)
-    register_hip3_dexes(exchange.info)
+    register_hip3_dexes(exchange.info, market_meta=market_meta)
+    if not n_hip3:
+        # Non-fatal (the original perp dex and outcomes still trade) but loud:
+        # while this holds, every `xyz:*` leader fill is refused rather than
+        # guessed, and xyz:SP500 is our best leader's main market. The loop
+        # below drops to a 60s retry cadence until it recovers.
+        log.error("HIP-3 registration returned 0 assets — xyz:* is untradeable until it recovers")
+        alerter.alert("error", "HIP-3 registration returned 0 assets at startup: xyz:* untradeable")
 
     # Backfill closure — wired into ConnectionHealth so a stale WS triggers a REST sweep
     follower_holder: dict[str, FillFollower] = {}
@@ -197,6 +209,33 @@ def main(argv: list[str] | None = None) -> int:
         manual_holdings=cfg.risk.manual_holdings,
     )
 
+    def check_dropped_leaders(when: str) -> None:
+        """Flag mirrors whose originating leader is no longer followed.
+
+        Fed the CURRENT leader set, NOT `follower.addresses` — the follower
+        never unsubscribes, so its address list still contains every leader we
+        have ever followed and can never reveal a drop. Detect-only: it
+        journals + alerts once per coin and never closes anything.
+
+        Until 2026-08-15 nothing watched for this. Four mirrors from two
+        leaders dropped in July sat untouched for weeks holding 100% of base
+        margin ($67.64 initial / $344 gross), starving every signal from our
+        current leaders until an operator closed them by hand.
+        """
+        try:
+            flagged = leader_reconciler.check_dropped_leaders(
+                [t.address for t in leaders]
+            )
+            n = sum(1 for s in flagged.values() if s == STATUS_DROPPED)
+            if n:
+                log.warning("Dropped-leader check (%s): %d orphaned position(s)", when, n)
+        except Exception:
+            log.exception("Dropped-leader check failed (%s)", when)
+
+    # Startup pass: catch anything stranded while we were down or by a config
+    # edit between runs.
+    check_dropped_leaders("startup")
+
     funding_history = FundingHistory(state)
     # Cold-start backfill of funding history; subsequent polls are incremental.
     try:
@@ -242,6 +281,18 @@ def main(argv: list[str] | None = None) -> int:
     # 2026-05-28 xyz:QNT). re-register every 30 min is cheap (2 small HTTP
     # calls per dex) and idempotent (set_perp_meta overwrites existing entries).
     hip3_refresh_interval_s = 1800
+    # ...but 30 min is FAR too long to stay blind. Since 2026-08 an
+    # unregistered `xyz:*` coin is refused outright (we no longer guess 4dp
+    # and poison the coin — see src/market_meta.py), so "blind" now means
+    # "not trading that surface at all". That surface is not marginal: our
+    # best-evidenced leader 0x819d06c0 (sharpe 0.59, 80% hit) is 64%
+    # xyz:SP500 — 1,287 of its last 2,000 fills. A failed registration must
+    # therefore be retried on the order of a minute, not half an hour.
+    # `register_hip3_dexes` already burns ~6s of internal backoff per attempt,
+    # so 60s is a genuine 1-min cadence, not a hot loop.
+    hip3_retry_interval_s = 60
+    # 0 = we have no builder-dex coins registered → use the fast cadence.
+    hip3_registered = n_hip3
     # HIP-4 outcomes (#NN coin names) follow the same dynamic-registration
     # pattern as HIP-3. New outcome markets get added by HL between bot starts
     # (live cost 2026-06-02 #1420 NBA Finals — leader_reconcile auto-close
@@ -278,17 +329,36 @@ def main(argv: list[str] | None = None) -> int:
                     funding_history.poll(info, cfg.account_address)
                 except Exception:
                     log.exception("Funding history poll failed")
-            if now - last_hip3_refresh >= hip3_refresh_interval_s:
+            hip3_due_in = hip3_refresh_interval_s if hip3_registered else hip3_retry_interval_s
+            if now - last_hip3_refresh >= hip3_due_in:
                 last_hip3_refresh = now
                 try:
                     prev_count = len(getattr(info, "coin_to_asset", {}))
-                    register_hip3_dexes(info)
-                    register_hip3_dexes(exchange.info)
+                    n = register_hip3_dexes(info, market_meta=market_meta)
+                    register_hip3_dexes(exchange.info, market_meta=market_meta)
                     new_count = len(getattr(info, "coin_to_asset", {}))
                     if new_count != prev_count:
                         log.info(
                             "HIP-3 refresh: coin map %d → %d (gained %d new symbols)",
                             prev_count, new_count, new_count - prev_count,
+                        )
+                    was_blind = not hip3_registered
+                    hip3_registered = n
+                    if was_blind and n:
+                        # Recovered — the xyz surface is tradeable again.
+                        log.warning("HIP-3 registration RECOVERED: %d assets", n)
+                        alerter.alert("warn", f"HIP-3 registration recovered ({n} assets)")
+                    elif not n:
+                        # Still blind. Loud, because every xyz:* leader fill is
+                        # being refused while this holds (xyz:SP500 included).
+                        log.error(
+                            "HIP-3 registration still failing — xyz:* refused; "
+                            "retrying every %ds", hip3_retry_interval_s,
+                        )
+                        alerter.alert(
+                            "error",
+                            "HIP-3 registration failing: xyz:* untradeable "
+                            f"(retry {hip3_retry_interval_s}s)",
                         )
                 except Exception:
                     log.exception("HIP-3 periodic refresh failed")
@@ -322,6 +392,9 @@ def main(argv: list[str] | None = None) -> int:
                 if cfg.sizing.use_funding_aware_sizing:
                     funding.refresh()
                 leaders = refreshed
+                # A refresh is the ONLY moment a leader can leave the set, so
+                # it is the moment to look for mirrors they left behind.
+                check_dropped_leaders("refresh")
             except Exception:
                 log.exception("Leader refresh failed")
     finally:
@@ -335,4 +408,27 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # os._exit, not sys.exit, on the failure path.
+    #
+    # Incident 2026-08-15 03:09 UTC: preflight failed on a transient 429 and
+    # raised. `Info(...)` had already opened its websocket, and that reader is
+    # a NON-DAEMON thread, so the interpreter would not exit — the process sat
+    # alive, holding a PID, having aborted before it followed a single leader.
+    # systemd reported `active`, the watchdog saw a live pid, and the operator
+    # cron's engine count read 1. Every liveness check we own said HEALTHY
+    # while the bot traded nothing. A clean crash is strictly safer than that,
+    # because Restart=always then actually restarts us.
+    #
+    # os._exit skips atexit/finally, which is exactly right here: this path is
+    # reached only when startup already failed, so there is no journal to flush
+    # and no order in flight. The normal (rc == 0) path still returns through
+    # sys.exit so real shutdown cleanup runs.
+    rc = 1
+    try:
+        rc = main()
+    except BaseException:
+        log.exception("Fatal error during startup/run; forcing exit")
+        os._exit(1)
+    if rc != 0:
+        os._exit(rc)
+    sys.exit(rc)

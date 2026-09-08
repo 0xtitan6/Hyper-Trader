@@ -43,6 +43,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from .hl_fills import paginate_user_fills
 from .protocols import InfoProto
 
 log = logging.getLogger(__name__)
@@ -86,6 +87,8 @@ def load_metrics(
     perp_only: bool = False,
     max_retries: int = 3,
     base_backoff_s: float = 1.0,
+    max_pages: int = 20,
+    page_delay_s: float = 0.1,
 ) -> LeaderMetrics | None:
     """Fetch fills for `address` over the last `lookback_hours` and compute metrics.
 
@@ -96,41 +99,80 @@ def load_metrics(
     Retries with exponential backoff on transient HL errors (HTTP 429,
     timeouts, connection drops). Non-retryable errors (auth, malformed
     request, etc.) fail fast without burning retries.
+
+    PAGINATED since 2026-08-21. `userFillsByTime` caps at 2,000 rows returned
+    OLDEST-first, so this used to score the first ~2 days of a 30-day window
+    on any busy wallet and call it the month. `0x7177edd4` — 30,127 trades —
+    scored `trades=0` and was rejected as inactive, because its visible slice
+    was all `#NNNNN` outcome fills and its perp fills sat past the cap. See
+    `hl_fills`; `src/backtest.py` reads through the same pager so discovery and
+    the backtest cannot disagree about a leader's history.
+
+    `max_pages=20` (40k fills) bounds the added /info traffic. Scoring was one
+    call per candidate; measured against the live 30d leaderboard on
+    2026-08-21, 31 candidates clear the coarse filter and the paged walk costs
+    at most 119 calls per cycle (`refresh_seconds: 600`), against 31 before.
+    Chosen from the live distribution:
+
+        max_pages=10 ->  98 calls, 4 candidates unmeasured
+        max_pages=15 -> 113 calls, 2 candidates unmeasured
+        max_pages=20 -> 119 calls, 1 candidate  unmeasured   <- here
+        max_pages=81 -> 180 calls, 0 unmeasured
+
+    At 20 the only wallet that exhausts the cap is `0xa6fab199` (~162k trades
+    in 30d) — a sub-second scalper we cannot copy at a $30 clip whatever its
+    score says (INV 13). Exhausting the cap returns None (UNKNOWN, logged
+    `fills_pagination_cap_exhausted`), never a truncated score: an unmeasurable
+    wallet must read as unmeasured, not as a confident `trades=0`. That
+    confusion IS the bug this change exists to end.
     """
     since_ms = int((time.time() - lookback_hours * 3600) * 1000)
-    payload = {"type": "userFillsByTime", "user": address.lower(), "startTime": since_ms}
 
-    fills: object = None
-    for attempt in range(max_retries):
-        try:
-            fills = info.post("/info", payload)
-            break
-        except Exception as e:
-            err_str = str(e)
-            is_retryable = (
-                "429" in err_str
-                or "Timeout" in err_str
-                or "Connection" in err_str
-            )
-            if not is_retryable or attempt + 1 >= max_retries:
-                log.warning(
-                    "leader_score: userFillsByTime failed for %s after %d attempt(s): %s",
+    def fetch_page(start_ms: int) -> list[dict] | None:
+        """One page, with the existing retry policy. None once retries are spent."""
+        payload = {
+            "type": "userFillsByTime",
+            "user": address.lower(),
+            "startTime": start_ms,
+        }
+        for attempt in range(max_retries):
+            try:
+                return info.post("/info", payload)
+            except Exception as e:
+                err_str = str(e)
+                is_retryable = (
+                    "429" in err_str
+                    or "Timeout" in err_str
+                    or "Connection" in err_str
+                )
+                if not is_retryable or attempt + 1 >= max_retries:
+                    log.warning(
+                        "leader_score: userFillsByTime failed for %s after %d attempt(s): %s",
+                        address[:10],
+                        attempt + 1,
+                        err_str[:160],
+                    )
+                    return None
+                sleep_s = base_backoff_s * (2**attempt)
+                log.info(
+                    "leader_score: retryable error on %s (attempt %d/%d); sleeping %.1fs",
                     address[:10],
                     attempt + 1,
-                    err_str[:160],
+                    max_retries,
+                    sleep_s,
                 )
-                return None
-            sleep_s = base_backoff_s * (2**attempt)
-            log.info(
-                "leader_score: retryable error on %s (attempt %d/%d); sleeping %.1fs",
-                address[:10],
-                attempt + 1,
-                max_retries,
-                sleep_s,
-            )
-            time.sleep(sleep_s)
+                time.sleep(sleep_s)
+        return None
 
-    if not isinstance(fills, list):
+    fills = paginate_user_fills(
+        fetch_page,
+        since_ms,
+        label=address[:10],
+        max_pages=max_pages,
+        page_delay_s=page_delay_s,
+    )
+
+    if fills is None:
         return None
     return _compute_metrics(
         address=address, lookback_hours=lookback_hours, fills=fills, perp_only=perp_only

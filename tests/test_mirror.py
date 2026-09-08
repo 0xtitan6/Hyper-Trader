@@ -1,9 +1,11 @@
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from src.mirror import MirrorTrader, TradeIntent
+from src.positions import MarginSnapshot
 
 
 @pytest.fixture
@@ -11,6 +13,10 @@ def positions():
     p = MagicMock()
     p.realized_pnl_today.return_value = 0.0
     p.total_exposure_usd.return_value = 0.0
+    # Per-dex exposure (2026-08-15). Must be a real float: the cap compares it
+    # numerically, and a bare MagicMock silently poisons every test that opens
+    # a position rather than failing in an obvious place.
+    p.exposure_usd_for_dex.return_value = 0.0
     # Default: no existing position → reduce_only stays False
     p.state.get_position.return_value = (0.0, 0.0)
     # Default: no originator set → conflict-lock falls through (PR #25)
@@ -59,7 +65,7 @@ def test_sell_path_subtracts_slippage(
 ):
     cfg = _override_risk(cfg, dry_run=False)
     mt = MirrorTrader(cfg, exchange, positions, journal, alerter, market_meta)
-    fill = {**outcome_fill, "side": "A"}
+    fill = {**outcome_fill, "startPosition": "0", "side": "A"}
     mt.on_leader_fill("0xleader", fill)
     args, _ = exchange.order.call_args
     px = args[3]
@@ -87,6 +93,8 @@ def test_daily_loss_blocks_and_alerts(cfg, positions, journal, exchange, outcome
 
 def test_exposure_cap_blocks(cfg, positions, journal, alerter, exchange, outcome_fill, market_meta):
     positions.total_exposure_usd.return_value = 499.0
+    # Base bucket ("" dex) holds the exposure now that the cap is per-dex.
+    positions.exposure_usd_for_dex.return_value = 499.0
     cfg2 = _override_risk(cfg, dry_run=False, max_total_exposure_usd=500)
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
     mt.on_leader_fill("0xleader", outcome_fill)
@@ -94,7 +102,7 @@ def test_exposure_cap_blocks(cfg, positions, journal, alerter, exchange, outcome
 
 
 def test_disallowed_market_skipped(cfg, positions, journal, alerter, exchange, market_meta):
-    fill = {"tid": 1, "coin": "BTC", "px": "65000", "sz": "0.01", "side": "B"}
+    fill = {"tid": 1, "coin": "BTC", "px": "65000", "sz": "0.01", "startPosition": "0", "side": "B"}
     cfg2 = _override_risk(cfg, dry_run=False)  # only outcome allowed by default
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
     mt.on_leader_fill("0xleader", fill)
@@ -104,7 +112,7 @@ def test_disallowed_market_skipped(cfg, positions, journal, alerter, exchange, m
 def test_perp_allowed_when_configured(cfg, positions, journal, alerter, exchange, market_meta):
     cfg2 = _override_risk(cfg, dry_run=False, allowed_market_types=["outcome", "perp"])
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
-    fill = {"tid": 1, "coin": "BTC", "px": "65000", "sz": "0.01", "side": "B"}
+    fill = {"tid": 1, "coin": "BTC", "px": "65000", "sz": "0.01", "startPosition": "0", "side": "B"}
     mt.on_leader_fill("0xleader", fill)
     exchange.order.assert_called_once()
 
@@ -114,7 +122,7 @@ def test_below_min_per_trade_skipped(cfg, positions, journal, alerter, exchange,
     cfg2 = _override_risk(cfg2, dry_run=False)
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
     # leader_notional = 1 * 0.01 = 0.01, * 0.10 = 0.001 → below min
-    fill = {"tid": 1, "coin": "#11", "px": "0.01", "sz": "1", "side": "B"}
+    fill = {"tid": 1, "coin": "#11", "px": "0.01", "sz": "1", "startPosition": "0", "side": "B"}
     mt.on_leader_fill("0xleader", fill)
     exchange.order.assert_not_called()
 
@@ -124,7 +132,7 @@ def test_max_per_trade_caps_size(cfg, positions, journal, alerter, exchange, mar
     cfg2 = _override_risk(cfg2, dry_run=False)
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
     # huge leader fill: $10000 notional * 0.1 = $1000, capped at $50
-    fill = {"tid": 1, "coin": "#11", "px": "1.00", "sz": "10000", "side": "B"}
+    fill = {"tid": 1, "coin": "#11", "px": "1.00", "sz": "10000", "startPosition": "0", "side": "B"}
     mt.on_leader_fill("0xleader", fill)
     args, _ = exchange.order.call_args
     sz = args[2]
@@ -135,7 +143,7 @@ def test_fixed_sizing_uses_fixed_usd(cfg, positions, journal, alerter, exchange,
     cfg2 = _override_sizing(cfg, mode="fixed", fixed_usd=30)
     cfg2 = _override_risk(cfg2, dry_run=False)
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
-    fill = {"tid": 1, "coin": "#11", "px": "0.50", "sz": "1000", "side": "B"}
+    fill = {"tid": 1, "coin": "#11", "px": "0.50", "sz": "1000", "startPosition": "0", "side": "B"}
     mt.on_leader_fill("0xleader", fill)
     args, _ = exchange.order.call_args
     sz = args[2]
@@ -151,7 +159,7 @@ def test_per_leader_weight_doubles_size(
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
     mt.update_leader_weights({"0xtrusted": 2.0})
     # Leader $100 notional x 0.10 prop x 2.0 weight = $20 mirror
-    fill = {"tid": 1, "coin": "#11", "px": "1.0", "sz": "100", "side": "B"}
+    fill = {"tid": 1, "coin": "#11", "px": "1.0", "sz": "100", "startPosition": "0", "side": "B"}
     mt.on_leader_fill("0xtrusted", fill)
     args, _ = exchange.order.call_args
     sz = args[2]
@@ -168,7 +176,7 @@ def test_per_leader_weight_halves_size(
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
     mt.update_leader_weights({"0xweak": 0.5})
     # Leader $100 notional x 0.10 prop x 0.5 weight = $5 mirror
-    fill = {"tid": 1, "coin": "#11", "px": "1.0", "sz": "100", "side": "B"}
+    fill = {"tid": 1, "coin": "#11", "px": "1.0", "sz": "100", "startPosition": "0", "side": "B"}
     mt.on_leader_fill("0xweak", fill)
     args, _ = exchange.order.call_args
     sz = args[2]
@@ -182,11 +190,14 @@ def test_unknown_leader_uses_default_weight(
     cfg2 = _override_risk(cfg, dry_run=False)
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
     mt.update_leader_weights({"0xother": 5.0})
-    fill = {"tid": 1, "coin": "#11", "px": "0.50", "sz": "100", "side": "B"}
+    # Deliberately 2x the $5 min: a clip sitting exactly ON min_per_trade_usd
+    # now triggers the sub-minimum rescue (2026-08-14), which would make this
+    # weight assertion about rounding instead of about weights.
+    fill = {"tid": 1, "coin": "#11", "px": "1.00", "sz": "100", "startPosition": "0", "side": "B"}
     mt.on_leader_fill("0xnotinmap", fill)
     args, _ = exchange.order.call_args
     sz = args[2]
-    # No weight applied: $50 leader notional x 0.10 = $5 mirror / 0.50 = 10
+    # No weight applied: $100 leader notional x 0.10 = $10 mirror / 1.00 = 10
     assert sz == 10.0
 
 
@@ -198,7 +209,7 @@ def test_weight_lookup_is_case_insensitive(
     cfg2 = _override_risk(cfg2, dry_run=False)
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
     mt.update_leader_weights({"0xABCDEF": 2.0})  # uppercase set
-    fill = {"tid": 1, "coin": "#11", "px": "1.0", "sz": "100", "side": "B"}
+    fill = {"tid": 1, "coin": "#11", "px": "1.0", "sz": "100", "startPosition": "0", "side": "B"}
     mt.on_leader_fill("0xabcdef", fill)  # lowercase callback
     args, _ = exchange.order.call_args
     sz = args[2]
@@ -234,7 +245,7 @@ def test_funding_amplifies_short_when_funding_positive(
     )
     # Leader sells (short) BTC: $1000 leader notional x 0.10 = $100
     # we_get_paid_apr = +50, raw_mult = 1 + 50/200 = 1.25 → $125 mirror
-    fill = {"tid": 1, "coin": "BTC", "px": "100", "sz": "10", "side": "A"}
+    fill = {"tid": 1, "coin": "BTC", "px": "100", "sz": "10", "startPosition": "0", "side": "A"}
     mt.on_leader_fill("0xleader", fill)
     args, _ = exchange.order.call_args
     sz = args[2]
@@ -258,7 +269,7 @@ def test_funding_amplification_clipped_by_cap(
     mt = MirrorTrader(
         cfg2, exchange, positions, journal, alerter, market_meta, funding=funding
     )
-    fill = {"tid": 1, "coin": "BTC", "px": "100", "sz": "10", "side": "A"}  # short
+    fill = {"tid": 1, "coin": "BTC", "px": "100", "sz": "10", "startPosition": "0", "side": "A"}  # short
     mt.on_leader_fill("0xleader", fill)
     args, _ = exchange.order.call_args
     sz = args[2]
@@ -279,7 +290,7 @@ def test_funding_skips_when_adverse_above_threshold(
     mt = MirrorTrader(
         cfg2, exchange, positions, journal, alerter, market_meta, funding=funding
     )
-    fill = {"tid": 1, "coin": "BTC", "px": "100", "sz": "10", "side": "B"}  # long
+    fill = {"tid": 1, "coin": "BTC", "px": "100", "sz": "10", "startPosition": "0", "side": "B"}  # long
     mt.on_leader_fill("0xleader", fill)
     exchange.order.assert_not_called()
 
@@ -299,7 +310,7 @@ def test_funding_no_effect_below_threshold(
     mt = MirrorTrader(
         cfg2, exchange, positions, journal, alerter, market_meta, funding=funding
     )
-    fill = {"tid": 1, "coin": "BTC", "px": "100", "sz": "10", "side": "A"}
+    fill = {"tid": 1, "coin": "BTC", "px": "100", "sz": "10", "startPosition": "0", "side": "A"}
     mt.on_leader_fill("0xleader", fill)
     args, _ = exchange.order.call_args
     sz = args[2]
@@ -321,7 +332,7 @@ def test_funding_skip_when_we_pay_extreme(
     mt = MirrorTrader(
         cfg2, exchange, positions, journal, alerter, market_meta, funding=funding
     )
-    fill = {"tid": 1, "coin": "STABLE", "px": "0.05", "sz": "1000", "side": "A"}
+    fill = {"tid": 1, "coin": "STABLE", "px": "0.05", "sz": "1000", "startPosition": "0", "side": "A"}
     mt.on_leader_fill("0xleader", fill)
     exchange.order.assert_not_called()
 
@@ -335,7 +346,7 @@ def test_funding_disabled_when_flag_off(
     mt = MirrorTrader(
         cfg2, exchange, positions, journal, alerter, market_meta, funding=funding
     )
-    fill = {"tid": 1, "coin": "BTC", "px": "100", "sz": "10", "side": "A"}
+    fill = {"tid": 1, "coin": "BTC", "px": "100", "sz": "10", "startPosition": "0", "side": "A"}
     mt.on_leader_fill("0xleader", fill)
     args, _ = exchange.order.call_args
     sz = args[2]
@@ -352,7 +363,7 @@ def test_funding_does_not_affect_outcome_trades(
     mt = MirrorTrader(
         cfg2, exchange, positions, journal, alerter, market_meta, funding=funding
     )
-    fill = {"tid": 1, "coin": "#11", "px": "0.54", "sz": "100", "side": "B"}
+    fill = {"tid": 1, "coin": "#11", "px": "0.54", "sz": "100", "startPosition": "0", "side": "B"}
     mt.on_leader_fill("0xleader", fill)
     exchange.order.assert_called_once()
 
@@ -360,11 +371,11 @@ def test_funding_does_not_affect_outcome_trades(
 def test_malformed_fills_skipped(mt, exchange):
     bad_fills = [
         {"tid": 1},  # missing everything
-        {"tid": 1, "coin": "#11", "px": "0", "sz": "10", "side": "B"},  # zero px
-        {"tid": 1, "coin": "#11", "px": "0.5", "sz": "0", "side": "B"},  # zero sz
+        {"tid": 1, "coin": "#11", "px": "0", "sz": "10", "startPosition": "0", "side": "B"},  # zero px
+        {"tid": 1, "coin": "#11", "px": "0.5", "sz": "0", "startPosition": "0", "side": "B"},  # zero sz
         {"tid": 1, "coin": "#11", "px": "0.5", "sz": "10", "side": "?"},  # bad side
-        {"tid": 1, "coin": "", "px": "0.5", "sz": "10", "side": "B"},  # empty coin
-        {"tid": 1, "coin": "#11", "px": "abc", "sz": "10", "side": "B"},  # non-numeric
+        {"tid": 1, "coin": "", "px": "0.5", "sz": "10", "startPosition": "0", "side": "B"},  # empty coin
+        {"tid": 1, "coin": "#11", "px": "abc", "sz": "10", "startPosition": "0", "side": "B"},  # non-numeric
     ]
     for f in bad_fills:
         mt.on_leader_fill("0xleader", f)
@@ -432,7 +443,7 @@ def test_configurable_slippage_50bps(
     px = exchange.order.call_args.args[3]
     leader_px = float(outcome_fill["px"])
     # 0.5% above leader px, then 5-sig-fig rounding
-    expected = market_meta.round_price(leader_px * 1.005)
+    expected = market_meta.round_price(leader_px * 1.005, outcome_fill["coin"])
     assert abs(px - expected) < 1e-9
 
 
@@ -446,7 +457,7 @@ def test_configurable_slippage_zero(
     px = exchange.order.call_args.args[3]
     leader_px = float(outcome_fill["px"])
     # zero slippage → submitted px equals (rounded) leader px
-    assert abs(px - market_meta.round_price(leader_px)) < 1e-9
+    assert abs(px - market_meta.round_price(leader_px, outcome_fill["coin"])) < 1e-9
 
 
 def test_reduce_only_on_opposing_sell_into_long(
@@ -456,7 +467,7 @@ def test_reduce_only_on_opposing_sell_into_long(
     positions.state.get_position.return_value = (50.0, 0.5)
     cfg2 = _override_risk(cfg, dry_run=False)
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
-    fill = {**outcome_fill, "side": "A"}  # SELL
+    fill = {**outcome_fill, "startPosition": "0", "side": "A"}  # SELL
     mt.on_leader_fill("0xleader", fill)
     kwargs = exchange.order.call_args.kwargs
     assert kwargs["reduce_only"] is True
@@ -493,11 +504,12 @@ def test_no_reduce_only_when_flips_through_zero(
     positions = MagicMock()
     positions.realized_pnl_today.return_value = 0.0
     positions.total_exposure_usd.return_value = 0.0
+    positions.exposure_usd_for_dex.return_value = 0.0
     positions.state.get_position.return_value = (5.0, 0.5)
     cfg2 = _override_risk(cfg, dry_run=False)
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
     # leader fill: SELL 100 @ 0.50 → 50 leader notional x 0.10 = $5 mirror = 10 size
-    fill = {"tid": 7, "coin": "#11", "px": "0.50", "sz": "100", "side": "A"}
+    fill = {"tid": 7, "coin": "#11", "px": "0.50", "sz": "100", "startPosition": "0", "side": "A"}
     mt.on_leader_fill("0xleader", fill)
     kwargs = exchange.order.call_args.kwargs
     assert kwargs["reduce_only"] is False  # 10 > existing 5 → flip → not reduce_only
@@ -512,7 +524,7 @@ def test_reduce_only_bypasses_exposure_cap(
     positions.total_exposure_usd.return_value = 1_000_000.0  # way over cap
     cfg2 = _override_risk(cfg, dry_run=False, max_total_exposure_usd=100)
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
-    fill = {**outcome_fill, "side": "A"}  # opposing sell-into-long
+    fill = {**outcome_fill, "startPosition": "0", "side": "A"}  # opposing sell-into-long
     mt.on_leader_fill("0xleader", fill)
     exchange.order.assert_called_once()
     assert exchange.order.call_args.kwargs["reduce_only"] is True
@@ -533,7 +545,7 @@ def test_in_flight_notional_blocks_runaway(cfg, positions, journal, alerter, exc
     cfg2 = _override_sizing(cfg2, max_per_trade_usd=10, min_per_trade_usd=1)
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
     # Each leader fill produces a $5.40 mirror notional after the 0.10 fraction.
-    fill = {"tid": 1, "coin": "#11", "px": "0.54", "sz": "100", "side": "B"}
+    fill = {"tid": 1, "coin": "#11", "px": "0.54", "sz": "100", "startPosition": "0", "side": "B"}
     # Local position state stays at 0 (positions mock doesn't update on fill).
     # Without in-flight tracking, ALL would submit. With it, only ceil(20/5.40)
     # = 3 submissions before cap engages.
@@ -560,7 +572,7 @@ def test_in_flight_expires_after_ttl(
     cfg2 = _override_sizing(cfg2, max_per_trade_usd=10, min_per_trade_usd=1)
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
 
-    fill = {"tid": 1, "coin": "#11", "px": "0.54", "sz": "100", "side": "B"}
+    fill = {"tid": 1, "coin": "#11", "px": "0.54", "sz": "100", "startPosition": "0", "side": "B"}
     mt.on_leader_fill("0xleader", fill)
     initial_calls = exchange.order.call_count
     assert initial_calls == 1
@@ -610,7 +622,7 @@ def test_reduce_only_does_not_consume_in_flight_budget(
     cfg2 = _override_sizing(cfg2, max_per_trade_usd=10, min_per_trade_usd=1)
     positions.state.get_position.return_value = (50.0, 0.5)  # opposing long
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
-    fill = {**outcome_fill, "side": "A"}  # SELL into opposing long → reduce_only
+    fill = {**outcome_fill, "startPosition": "0", "side": "A"}  # SELL into opposing long → reduce_only
     mt.on_leader_fill("0xleader", fill)
     assert exchange.order.call_count == 1
     # Reduce-only WAS submitted but should not have eaten in-flight budget.
@@ -728,7 +740,7 @@ def test_outcome_min_does_not_block_perps(cfg, positions, journal, alerter, exch
     cfg2 = _override_risk(cfg2, dry_run=False, allowed_market_types=["perp"])
     mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
     # Perp BTC fill: 0.001 sz @ $50000 → leader notional $50, mirror 0.10 = $5
-    fill = {"tid": 99, "coin": "BTC", "px": "50000", "sz": "0.001", "side": "B"}
+    fill = {"tid": 99, "coin": "BTC", "px": "50000", "sz": "0.001", "startPosition": "0", "side": "B"}
     mt.on_leader_fill("0xleader", fill)
     exchange.order.assert_called_once()
 
@@ -757,7 +769,7 @@ def test_post_round_min_skip(cfg, positions, journal, alerter, exchange, market_
     # rounded to 10 (already integer), notional = 10 x 1.05 = $10.50 — passes
     # let's craft one that fails: 95 @ 1.05 → 99.75 x 0.10 = 9.975, raw_sz=9.5
     # → rounded 9, notional = 9 x 1.05 = 9.45 < 10 min → skip
-    fill = {"tid": 9, "coin": "#11", "px": "1.05", "sz": "95", "side": "B"}
+    fill = {"tid": 9, "coin": "#11", "px": "1.05", "sz": "95", "startPosition": "0", "side": "B"}
     mt.on_leader_fill("0xleader", fill)
     exchange.order.assert_not_called()
 
@@ -783,7 +795,7 @@ def test_conflict_lock_allows_first_leader_to_open(
     pt = PositionTracker(info, "0xacc", state, journal)
     cfg2 = _override_risk(cfg, dry_run=False, allowed_market_types=["perp"])
     mt = MirrorTrader(cfg2, exchange, pt, journal, alerter, market_meta)
-    fill = {"tid": 1, "coin": "BTC", "px": "100", "sz": "10", "side": "B"}
+    fill = {"tid": 1, "coin": "BTC", "px": "100", "sz": "10", "startPosition": "0", "side": "B"}
     mt.on_leader_fill("0xleaderA", fill)
     exchange.order.assert_called_once()
     # Need to also simulate the position update (since exchange is mocked, the
@@ -808,7 +820,7 @@ def test_conflict_lock_blocks_lower_weight_opposite_leader(
     mt = MirrorTrader(cfg2, exchange, pt, journal, alerter, market_meta)
     mt.update_leader_weights({"0xleaderA": 4.0, "0xleaderB": 1.5})
     # Leader B tries to SELL BTC (opposite of A's long)
-    fill = {"tid": 2, "coin": "BTC", "px": "100", "sz": "10", "side": "A"}
+    fill = {"tid": 2, "coin": "BTC", "px": "100", "sz": "10", "startPosition": "0", "side": "A"}
     mt.on_leader_fill("0xleaderB", fill)
     exchange.order.assert_not_called()
 
@@ -828,7 +840,7 @@ def test_conflict_lock_allows_higher_weight_override(
     mt = MirrorTrader(cfg2, exchange, pt, journal, alerter, market_meta)
     # Leader A is now LOW weight, leader B HIGH
     mt.update_leader_weights({"0xleaderA": 1.1, "0xleaderB": 4.0})
-    fill = {"tid": 3, "coin": "BTC", "px": "100", "sz": "10", "side": "A"}
+    fill = {"tid": 3, "coin": "BTC", "px": "100", "sz": "10", "startPosition": "0", "side": "A"}
     mt.on_leader_fill("0xleaderB", fill)
     exchange.order.assert_called_once()
 
@@ -847,7 +859,7 @@ def test_conflict_lock_allows_same_leader_to_continue(
     cfg2 = _override_risk(cfg, dry_run=False, allowed_market_types=["perp"])
     mt = MirrorTrader(cfg2, exchange, pt, journal, alerter, market_meta)
     mt.update_leader_weights({"0xleaderA": 4.0})
-    fill = {"tid": 4, "coin": "BTC", "px": "100", "sz": "10", "side": "A"}
+    fill = {"tid": 4, "coin": "BTC", "px": "100", "sz": "10", "startPosition": "0", "side": "A"}
     mt.on_leader_fill("0xleaderA", fill)
     exchange.order.assert_called_once()
 
@@ -867,7 +879,7 @@ def test_conflict_lock_allows_same_direction_add_from_different_leader(
     mt = MirrorTrader(cfg2, exchange, pt, journal, alerter, market_meta)
     mt.update_leader_weights({"0xleaderA": 4.0, "0xleaderB": 1.5})
     # Leader B BUYS BTC (same direction as A's long)
-    fill = {"tid": 5, "coin": "BTC", "px": "100", "sz": "10", "side": "B"}
+    fill = {"tid": 5, "coin": "BTC", "px": "100", "sz": "10", "startPosition": "0", "side": "B"}
     mt.on_leader_fill("0xleaderB", fill)
     exchange.order.assert_called_once()
 
@@ -899,7 +911,7 @@ def test_conflict_lock_unknown_originator_falls_through(
     cfg2 = _override_risk(cfg, dry_run=False, allowed_market_types=["perp"])
     mt = MirrorTrader(cfg2, exchange, pt, journal, alerter, market_meta)
     mt.update_leader_weights({"0xleaderA": 1.5})
-    fill = {"tid": 7, "coin": "BTC", "px": "100", "sz": "10", "side": "A"}
+    fill = {"tid": 7, "coin": "BTC", "px": "100", "sz": "10", "startPosition": "0", "side": "A"}
     mt.on_leader_fill("0xleaderA", fill)
     exchange.order.assert_called_once()
 
@@ -1081,3 +1093,1100 @@ def test_accepted_order_reserves_in_flight(
     mt.on_leader_fill("0xleader", outcome_fill)
     assert len(mt._in_flight) == 1
     positions.state.set_position_originator.assert_called_once()
+
+
+# --- free-margin headroom (audit 2026-08-14: 1,599 "Insufficient margin"
+# rejects in 30d vs 457 accepted orders) --------------------------------------
+
+
+def _snap(free: float = 1000.0, exposure: float = 0.0, age_s: float = 0.0) -> MarginSnapshot:
+    return MarginSnapshot(
+        account_value_usd=free,
+        total_margin_used_usd=0.0,
+        free_collateral_usd=free,
+        exposure_at_snapshot_usd=exposure,
+        ts=time.time() - age_s,
+    )
+
+
+@pytest.fixture
+def perp_fill() -> dict:
+    # 0.01 * 65000 = $650 leader notional * 0.10 = $65 mirrored
+    return {"tid": 2001, "coin": "BTC", "px": "65000", "sz": "0.01", "startPosition": "0", "side": "B"}
+
+
+def _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta, **risk):
+    cfg2 = _override_risk(
+        cfg, dry_run=False, allowed_market_types=["outcome", "perp"], **risk
+    )
+    return MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+
+
+def test_margin_headroom_blocks_when_free_collateral_short(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    """$65 notional at 3x needs $21.67; $20 free (minus buffer) can't cover it."""
+    positions.margin_snapshot.return_value = _snap(free=20.0)
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    exchange.order.assert_not_called()
+
+
+def test_margin_headroom_allows_when_free_collateral_ample(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    positions.margin_snapshot.return_value = _snap(free=1000.0)
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    exchange.order.assert_called_once()
+
+
+def test_margin_headroom_journals_distinct_reason(
+    cfg, positions, alerter, exchange, perp_fill, tmp_path, market_meta
+):
+    """Reason must be greppable — not the opaque 'filter' bucket."""
+    import json as _json
+
+    from src.journal import Journal as J
+
+    j = J(str(tmp_path / "j.jsonl"))
+    positions.margin_snapshot.return_value = _snap(free=1.0)
+    mt = _perp_mirror(cfg, exchange, positions, j, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    entries = [_json.loads(ln) for ln in (tmp_path / "j.jsonl").read_text().splitlines()]
+    checks = [e for e in entries if e["event"] == "risk_check"]
+    assert len(checks) == 1
+    assert checks[0]["ok"] is False
+    assert checks[0]["reason"].startswith("margin_headroom (")
+    assert "filter" not in checks[0]["reason"]
+
+
+def test_margin_headroom_respects_buffer_fraction(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    """$25 free covers the $21.67 requirement outright, but not with a 20% buffer."""
+    positions.margin_snapshot.return_value = _snap(free=25.0)
+    blocked = _perp_mirror(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        margin_headroom_buffer_frac=0.20,
+    )
+    blocked.on_leader_fill("0xleader", perp_fill)
+    exchange.order.assert_not_called()
+
+    allowed = _perp_mirror(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        margin_headroom_buffer_frac=0.0,
+    )
+    allowed.on_leader_fill("0xleader", {**perp_fill, "tid": 2002})
+    exchange.order.assert_called_once()
+
+
+def test_margin_headroom_uses_asset_max_leverage_when_below_target(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Same $50 notional, same $16 budget: needs $25 at the asset's 2x cap,
+    only $10 at the 5x target BTC allows."""
+    market_meta.record_asset("LOWLEV", sz_decimals=2, max_leverage=2)
+    positions.margin_snapshot.return_value = _snap(free=20.0)
+    mt = _perp_mirror(
+        cfg, exchange, positions, journal, alerter, market_meta, target_leverage=5.0
+    )
+    assert mt._effective_leverage("LOWLEV") == 2.0
+    assert mt._effective_leverage("BTC") == 5.0  # capped by target, not the 50x max
+
+    mt.on_leader_fill(
+        "0xleader", {"tid": 2003, "coin": "LOWLEV", "px": "100", "sz": "5", "startPosition": "0", "side": "B"}
+    )
+    exchange.order.assert_not_called()
+
+    mt.on_leader_fill(
+        "0xleader", {"tid": 2009, "coin": "BTC", "px": "50000", "sz": "0.01", "startPosition": "0", "side": "B"}
+    )
+    exchange.order.assert_called_once()
+
+
+def test_margin_headroom_charges_positions_opened_since_snapshot(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    """A leader burst must not re-spend the same free collateral every fill.
+
+    The snapshot only refreshes every 5 min (reconcile cadence), so margin
+    consumed by fills we just sent has to be subtracted locally — same class of
+    stale-state race that `_in_flight` fixed for the notional cap on 2026-05-05.
+    """
+    positions.margin_snapshot.return_value = _snap(free=40.0)
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    mt.on_leader_fill("0xleader", {**perp_fill, "tid": 2004})
+    # First fill fits ($21.67 < $32 budget); the second sees $65 of in-flight
+    # notional (= $21.67 of margin) already spent and no longer does.
+    exchange.order.assert_called_once()
+
+
+def test_margin_headroom_fails_open_without_snapshot(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    """No reconcile yet → don't halt trading; HL still enforces margin."""
+    positions.margin_snapshot.return_value = None
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    exchange.order.assert_called_once()
+
+
+def test_margin_headroom_fails_open_on_stale_snapshot(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    positions.margin_snapshot.return_value = _snap(free=0.01, age_s=5000.0)
+    mt = _perp_mirror(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        margin_snapshot_max_age_s=900.0,
+    )
+    mt.on_leader_fill("0xleader", perp_fill)
+    exchange.order.assert_called_once()
+
+
+def test_margin_headroom_skipped_for_outcomes(
+    cfg, positions, journal, alerter, exchange, outcome_fill, market_meta
+):
+    """Outcomes settle out of the spot USDH balance, not perp margin — and zero
+    of the 1,599 audited margin rejects were outcome legs."""
+    positions.margin_snapshot.return_value = _snap(free=0.0)
+    cfg2 = _override_risk(cfg, dry_run=False)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", outcome_fill)
+    exchange.order.assert_called_once()
+
+
+def test_margin_headroom_skipped_for_hip3_dex_coins(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """HIP-3 dexes hold separate collateral — the base account's free margin is
+    the wrong wallet to gate them on.
+
+    szDecimals must be registered first: since the 2026-08 precision fix a
+    builder-dex coin with unknown szDecimals is refused outright, which would
+    make this test pass for the wrong reason (no order because of precision,
+    not because the margin guard was skipped).
+    """
+    market_meta.register_dex_assets([{"name": "xyz:NVDA", "szDecimals": 2}])
+    positions.margin_snapshot.return_value = _snap(free=0.0)
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill(
+        "0xleader", {"tid": 2005, "coin": "xyz:NVDA", "px": "100", "sz": "5", "startPosition": "0", "side": "B"}
+    )
+    exchange.order.assert_called_once()
+
+
+def test_margin_headroom_does_not_block_reduce_only_exits(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    """Exits must always be allowed — they release margin, never consume it."""
+    positions.margin_snapshot.return_value = _snap(free=0.0)
+    positions.state.get_position.return_value = (-1.0, 65000.0)  # short → buy reduces
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    exchange.order.assert_called_once()
+    assert exchange.order.call_args.kwargs["reduce_only"] is True
+
+
+# --- explicit leverage (the bot never called update_leverage; live account
+# 2026-08-14 sat at HL defaults of 5-10x) --------------------------------------
+
+
+def test_leverage_pinned_on_first_open_and_cached(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    mt = _perp_mirror(
+        cfg, exchange, positions, journal, alerter, market_meta, target_leverage=3.0
+    )
+    mt.on_leader_fill("0xleader", perp_fill)
+    exchange.update_leverage.assert_called_once_with(3, "BTC", True)
+    mt.on_leader_fill("0xleader", {**perp_fill, "tid": 2006})
+    exchange.update_leverage.assert_called_once()  # cached — not re-sent per fill
+    assert "BTC" in mt._leverage_set
+
+
+def test_leverage_capped_at_asset_max(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    market_meta.record_asset("LOWLEV", sz_decimals=2, max_leverage=2)
+    mt = _perp_mirror(
+        cfg, exchange, positions, journal, alerter, market_meta, target_leverage=20.0
+    )
+    mt.on_leader_fill(
+        "0xleader", {"tid": 2007, "coin": "LOWLEV", "px": "100", "sz": "5", "startPosition": "0", "side": "B"}
+    )
+    exchange.update_leverage.assert_called_once_with(2, "LOWLEV", True)
+
+
+def test_leverage_not_touched_when_position_already_open(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    """Lowering leverage on a live position raises ITS margin requirement — on a
+    fully-margined account that costs liquidation buffer for no new edge."""
+    positions.state.get_position.return_value = (0.5, 60000.0)  # already long BTC
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    exchange.order.assert_called_once()
+    exchange.update_leverage.assert_not_called()
+
+
+def test_leverage_failure_never_blocks_the_order(
+    cfg, positions, journal, alerter, perp_fill, market_meta
+):
+    exchange = MagicMock()
+    exchange.order.return_value = {"status": "ok"}
+    exchange.update_leverage.side_effect = RuntimeError("hl down")
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    exchange.order.assert_called_once()
+    assert "BTC" not in mt._leverage_set
+
+
+def test_leverage_failure_backs_off_instead_of_retrying_every_fill(
+    cfg, positions, journal, alerter, perp_fill, market_meta
+):
+    exchange = MagicMock()
+    exchange.order.return_value = {"status": "ok"}
+    exchange.update_leverage.side_effect = RuntimeError("hl down")
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    mt.on_leader_fill("0xleader", {**perp_fill, "tid": 2008})
+    assert exchange.update_leverage.call_count == 1  # cooldown, no /exchange storm
+
+
+def test_leverage_in_band_rejection_is_not_cached_as_success(
+    cfg, positions, journal, alerter, perp_fill, market_meta
+):
+    """update_leverage rejects HTTP-200-with-error like order() does."""
+    exchange = MagicMock()
+    exchange.order.return_value = {"status": "ok"}
+    exchange.update_leverage.return_value = {"status": "err", "response": "Insufficient margin"}
+    mt = _perp_mirror(cfg, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    assert "BTC" not in mt._leverage_set
+    exchange.order.assert_called_once()
+
+
+def test_leverage_skipped_for_outcomes_and_when_disabled(
+    cfg, positions, journal, alerter, exchange, outcome_fill, perp_fill, market_meta
+):
+    cfg2 = _override_risk(cfg, dry_run=False)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", outcome_fill)
+    exchange.update_leverage.assert_not_called()  # outcomes aren't leveraged
+
+    off = _perp_mirror(
+        cfg, exchange, positions, journal, alerter, market_meta, set_leverage=False
+    )
+    off.on_leader_fill("0xleader", perp_fill)
+    exchange.update_leverage.assert_not_called()
+
+
+def test_leverage_not_set_in_dry_run(
+    cfg, positions, journal, alerter, exchange, perp_fill, market_meta
+):
+    cfg2 = _override_risk(cfg, dry_run=True, allowed_market_types=["outcome", "perp"])
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", perp_fill)
+    exchange.update_leverage.assert_not_called()
+# ---------- sub-minimum rounding rescue + distinct skip reasons ----------
+# Incident 2026-07-21 → 2026-08-14. Leader 0x6cd520c1's weight was cut
+# 1.5 → 1.0, making the fixed clip exactly $10.00 against a $10.00 minimum.
+# Floor-rounding the size to szDecimals took the notional to $9.9x, the
+# post-round min check discarded it, and the leader was silently muted for
+# 24 days: 10,706 fills filtered vs 79 orders accepted. Every skip journalled
+# the same opaque reason ("filter", 2,449,814 of them), so nothing surfaced.
+
+
+def _skip_reasons(journal) -> list[str]:
+    """All intent_skipped reasons written to the journal, in order."""
+    import json
+    from pathlib import Path
+
+    if not Path(journal.path).exists():
+        return []
+    out = []
+    for line in Path(journal.path).read_text().splitlines():
+        e = json.loads(line)
+        if e.get("event") == "intent_skipped":
+            out.append(e["reason"])
+    return out
+
+
+def _journal_events(journal, event: str) -> list[dict]:
+    import json
+    from pathlib import Path
+
+    if not Path(journal.path).exists():
+        return []
+    return [
+        e
+        for e in (json.loads(ln) for ln in Path(journal.path).read_text().splitlines())
+        if e.get("event") == event
+    ]
+
+
+def _perp_mt(cfg, exchange, positions, journal, alerter, market_meta, **sizing):
+    cfg2 = _override_sizing(cfg, **sizing)
+    cfg2 = _override_risk(cfg2, dry_run=False, allowed_market_types=["perp"])
+    return MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+
+
+def test_exact_min_clip_at_weight_one_still_trades(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """THE regression: fixed_usd=$10 x weight 1.0 = exactly the $10 minimum.
+
+    ETH szDecimals=4 @ $3000 → raw 0.0033333 → floors to 0.0033 = $9.90, which
+    the old code silently discarded. Must now round up one step and submit."""
+    mt = _perp_mt(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        mode="fixed", fixed_usd=10.0, min_per_trade_usd=10.0, max_per_trade_usd=100.0,
+    )
+    mt.update_leader_weights({"0x6cd520c1": 1.0})
+    mt.on_leader_fill("0x6cd520c1", {"tid": 1, "coin": "ETH", "px": "3000", "sz": "5", "startPosition": "0", "side": "B"})
+    exchange.order.assert_called_once()
+    sz = exchange.order.call_args.args[2]
+    assert abs(sz - 0.0034) < 1e-12  # one szDecimals step up from 0.0033
+    assert _skip_reasons(journal) == []
+
+
+def test_rescue_lands_above_min_not_exactly_on_it(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """HL values orders with its OWN reference price (30d: 199 rejects, all at
+    exactly $10.00 intent notional), so the rescue must clear the floor with
+    margin, not land on it."""
+    mt = _perp_mt(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        mode="fixed", fixed_usd=10.0, min_per_trade_usd=10.0, max_per_trade_usd=100.0,
+    )
+    import src.mirror as mirror_mod
+
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "ETH", "px": "3000", "sz": "5", "startPosition": "0", "side": "B"})
+    sz, px = exchange.order.call_args.args[2], 3000.0
+    assert sz * px >= 10.0 * (1 + mirror_mod.MIN_NOTIONAL_SAFETY_MARGIN)
+
+
+def test_rescue_journals_size_rounded_up(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """The bump must be auditable — an unlogged size change is how we got here."""
+    mt = _perp_mt(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        mode="fixed", fixed_usd=10.0, min_per_trade_usd=10.0, max_per_trade_usd=100.0,
+    )
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "ETH", "px": "3000", "sz": "5", "startPosition": "0", "side": "B"})
+    events = _journal_events(journal, "size_rounded_up")
+    assert len(events) == 1
+    assert events[0]["from_sz"] == 0.0033 and events[0]["to_sz"] == 0.0034
+    assert events[0]["to_notional"] > events[0]["from_notional"]
+
+
+def test_strategist_weight_034_rearms_and_is_rescued(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """fixed_usd=$30 masks the bug at weight 1.0, but the strategist sets
+    weights automatically: at 0.34 the clip is $10.20 and re-arms it."""
+    mt = _perp_mt(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        mode="fixed", fixed_usd=30.0, min_per_trade_usd=10.0, max_per_trade_usd=100.0,
+    )
+    mt.update_leader_weights({"0xweak": 0.34})
+    mt.on_leader_fill("0xweak", {"tid": 1, "coin": "ETH", "px": "3100", "sz": "5", "startPosition": "0", "side": "B"})
+    exchange.order.assert_called_once()
+    assert abs(exchange.order.call_args.args[2] - 0.0033) < 1e-12  # up from 0.0032
+
+
+def test_no_rescue_when_rounding_already_clears_min(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """A clip comfortably above the minimum is untouched — the rescue must not
+    inflate ordinary trades."""
+    mt = _perp_mt(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        mode="fixed", fixed_usd=30.0, min_per_trade_usd=10.0, max_per_trade_usd=100.0,
+    )
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "ETH", "px": "3000", "sz": "5", "startPosition": "0", "side": "B"})
+    assert abs(exchange.order.call_args.args[2] - 0.01) < 1e-12  # 30/3000, exact
+    assert _journal_events(journal, "size_rounded_up") == []
+
+
+def test_rescue_skipped_when_bump_breaches_max_per_trade(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """max_per_trade_usd is the hard stop: rounding up only ever adds exposure,
+    so a bump that breaches the operator's cap must skip instead."""
+    mt = _perp_mt(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        mode="fixed", fixed_usd=10.0, min_per_trade_usd=10.0, max_per_trade_usd=10.1,
+    )
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "ETH", "px": "3000", "sz": "5", "startPosition": "0", "side": "B"})
+    exchange.order.assert_not_called()  # bumped $10.20 > $10.10 cap
+    assert _skip_reasons(journal) == ["rounding:exceeds_max"]
+
+
+def test_rescue_allowed_when_bump_exactly_equals_max_per_trade(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Boundary: bumped notional == max_per_trade_usd is within the cap."""
+    mt = _perp_mt(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        mode="fixed", fixed_usd=10.0, min_per_trade_usd=10.0, max_per_trade_usd=10.2,
+    )
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "ETH", "px": "3000", "sz": "5", "startPosition": "0", "side": "B"})
+    exchange.order.assert_called_once()
+    assert abs(exchange.order.call_args.args[2] - 0.0034) < 1e-12  # exactly $10.20
+
+
+def test_unrepresentably_small_clip_is_rescued_to_one_lot(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """szDecimals=0 outcome priced above our clip floors to zero size. Old code
+    dropped it; now we buy the single smallest lot if it fits under the cap."""
+    cfg2 = _override_sizing(cfg, min_per_trade_usd=5.0, max_per_trade_usd=100.0)
+    cfg2 = _override_risk(cfg2, dry_run=False)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    # $60 leader notional x 0.10 = $6 clip; one share costs $8 → raw sz 0.75
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "#11", "px": "8", "sz": "7.5", "startPosition": "0", "side": "B"})
+    exchange.order.assert_called_once()
+    assert exchange.order.call_args.args[2] == 1.0
+
+
+def test_unrepresentably_small_clip_skips_when_one_lot_breaches_max(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """...but not when that single lot costs more than max_per_trade_usd."""
+    cfg2 = _override_sizing(cfg, min_per_trade_usd=5.0, max_per_trade_usd=7.0)
+    cfg2 = _override_risk(cfg2, dry_run=False)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "#11", "px": "8", "sz": "7.5", "startPosition": "0", "side": "B"})
+    exchange.order.assert_not_called()  # one $8 share > $7 cap
+    assert _skip_reasons(journal) == ["rounding:exceeds_max"]
+
+
+def test_rescue_skips_when_bump_exceeds_ratio_even_under_max_per_trade(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Review addition 2026-08-14: max_per_trade_usd is too loose a leash on
+    coarse-szDecimals assets. A $6 clip whose smallest lot costs $18 is a 3x
+    unintended position — well under a $100 per-trade cap, but not a rounding
+    fix any more. MAX_BUMP_RATIO must reject it."""
+    cfg2 = _override_sizing(cfg, min_per_trade_usd=5.0, max_per_trade_usd=100.0)
+    cfg2 = _override_risk(cfg2, dry_run=False)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    # $60 leader notional x 0.10 = $6 clip; one share costs $18 → 3.0x bump.
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "#11", "px": "18", "sz": "3.3334", "startPosition": "0", "side": "B"})
+    exchange.order.assert_not_called()
+    assert _skip_reasons(journal) == ["rounding:exceeds_bump_ratio"]
+
+
+def test_genuinely_sub_min_clip_is_never_sized_up(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """The safety property: the rescue only fires for clips the configured
+    weight/fraction already asked to be >= the minimum. A clip that is truly
+    below the minimum must still be discarded, never rounded up into one."""
+    mt = _perp_mt(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        mode="fixed", fixed_usd=10.0, min_per_trade_usd=10.0, max_per_trade_usd=100.0,
+    )
+    mt.update_leader_weights({"0xweak": 0.5})  # $5 clip vs $10 min
+    mt.on_leader_fill("0xweak", {"tid": 1, "coin": "ETH", "px": "3000", "sz": "5", "startPosition": "0", "side": "B"})
+    exchange.order.assert_not_called()
+    assert _skip_reasons(journal) == ["sub_min"]
+
+
+# ---------- distinct skip reasons (no more opaque "filter") ----------
+
+
+def test_skip_reason_market_type(cfg, positions, journal, alerter, exchange, market_meta):
+    cfg2 = _override_risk(cfg, dry_run=False, allowed_market_types=["outcome"])
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "BTC", "px": "65000", "sz": "1", "startPosition": "0", "side": "B"})
+    assert _skip_reasons(journal) == ["market_type"]
+
+
+def test_skip_reason_funding_skip(cfg, positions, journal, alerter, exchange, market_meta):
+    mt = _perp_mt(
+        cfg, exchange, positions, journal, alerter, market_meta,
+        use_funding_aware_sizing=True, funding_skip_threshold_apr_pct=100.0,
+    )
+    mt.funding = _funding_stub({"BTC": 200.0})
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "BTC", "px": "100", "sz": "10", "startPosition": "0", "side": "B"})
+    assert _skip_reasons(journal) == ["funding_skip"]
+
+
+def test_skip_reason_bad_fill_numbers(cfg, positions, journal, alerter, exchange, market_meta):
+    cfg2 = _override_risk(cfg, dry_run=False)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "#11", "px": "abc", "sz": "1", "startPosition": "0", "side": "B"})
+    assert _skip_reasons(journal) == ["bad_fill_numbers"]
+
+
+def test_skip_reason_bad_fill_fields(cfg, positions, journal, alerter, exchange, market_meta):
+    cfg2 = _override_risk(cfg, dry_run=False)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "#11", "px": "0.5", "sz": "1", "side": "X"})
+    assert _skip_reasons(journal) == ["bad_fill_fields"]
+
+
+def test_skip_reason_bad_sizing_mode(cfg, positions, journal, alerter, exchange, market_meta):
+    cfg2 = _override_sizing(cfg, mode="nonsense")
+    cfg2 = _override_risk(cfg2, dry_run=False)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", {"tid": 1, "coin": "#11", "px": "0.5", "sz": "100", "startPosition": "0", "side": "B"})
+    assert _skip_reasons(journal) == ["bad_sizing_mode"]
+
+
+def test_no_skip_reason_is_the_old_opaque_filter_token(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Guard rail: 2,449,814 undifferentiated 'filter' events in 30 days is what
+    hid a 24-day outage. Every skip path must name itself."""
+    cfg2 = _override_sizing(cfg, min_per_trade_usd=10.0, max_per_trade_usd=10.1)
+    cfg2 = _override_risk(cfg2, dry_run=False, allowed_market_types=["outcome"])
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    for i, fill in enumerate([
+        {"coin": "BTC", "px": "100", "sz": "10", "startPosition": "0", "side": "B"},      # market_type
+        {"coin": "#11", "px": "abc", "sz": "10", "startPosition": "0", "side": "B"},      # bad_fill_numbers
+        {"coin": "#11", "px": "0.5", "sz": "10", "side": "Z"},      # bad_fill_fields
+        {"coin": "#11", "px": "0.5", "sz": "10", "startPosition": "0", "side": "B"},      # sub_min
+        {"coin": "#11", "px": "8", "sz": "20", "startPosition": "0", "side": "B"},        # rounding:exceeds_max
+    ]):
+        mt.on_leader_fill("0xleader", {**fill, "tid": i + 1})
+    reasons = _skip_reasons(journal)
+    assert "filter" not in reasons
+    assert reasons == [
+        "market_type", "bad_fill_numbers", "bad_fill_fields", "sub_min", "rounding:exceeds_max",
+    ]
+    assert len(set(reasons)) == len(reasons)  # every path distinguishable
+# --- HIP-3 unknown-precision guard (2026-07/08 poison cascade) -------------
+#
+# Head of the chain: register_hip3_dexes failed 215x in Aug 2026, so xyz:*
+# had no szDecimals; we guessed 4dp, submitted `xyz:MU sz=0.0143` on 08-10,
+# HL answered `Order has invalid size`, _POISON_ORDER_ERRORS muted the coin
+# for 300s and every later leader fill on it died `poison_cooldown` —
+# 5,366 of them Jul-Aug. Now we skip the trade and say why.
+
+
+def _xyz_fill(coin="xyz:MU", px="140.0", sz="10"):
+    return {"tid": 2001, "coin": coin, "px": px, "sz": sz, "startPosition": "0", "side": "B", "time": 1714000000000}
+
+
+def _perp_cfg(cfg):
+    cfg = _override_risk(cfg, allowed_market_types=["outcome", "perp"], dry_run=False)
+    return _override_sizing(cfg, min_per_trade_usd=1.0, max_per_trade_usd=1000.0)
+
+
+def test_unknown_xyz_szdecimals_skips_instead_of_poisoning(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    cfg2 = _perp_cfg(cfg)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", _xyz_fill())
+    exchange.order.assert_not_called()
+
+
+def test_unknown_xyz_szdecimals_journals_diagnosable_reason(
+    cfg, positions, alerter, exchange, tmp_path
+):
+    import json
+
+    from src.journal import Journal
+    from src.market_meta import MarketMeta
+
+    info = MagicMock()
+    info.meta.return_value = {"universe": [{"name": "BTC", "szDecimals": 5}]}
+    info.spot_meta.return_value = {"universe": [], "tokens": []}
+    mm = MarketMeta(info)
+    mm.load()
+
+    j = Journal(str(tmp_path / "j.jsonl"))
+    cfg2 = _perp_cfg(cfg)
+    mt = MirrorTrader(cfg2, exchange, positions, j, alerter, mm)
+    mt.on_leader_fill("0xleader", _xyz_fill())
+
+    events = [json.loads(line) for line in (tmp_path / "j.jsonl").read_text().splitlines()]
+    skips = [e for e in events if e.get("event") == "intent_skipped"]
+    assert len(skips) == 1
+    # Distinct from the generic "filter" reason — greppable in the journal
+    assert skips[0]["reason"] == "unknown_sz_decimals"
+    assert skips[0]["coin"] == "xyz:MU"
+    assert "xyz:MU" in skips[0]["detail"]
+    exchange.order.assert_not_called()
+
+
+def test_registered_xyz_szdecimals_submits_at_3dp(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Once HIP-3 registration lands, the SAME fill trades — at 3dp, the real
+    xyz:MU precision. This is the whole point: unblock the surface, correctly."""
+    market_meta.register_dex_assets([{"name": "xyz:MU", "szDecimals": 3}])
+    cfg2 = _perp_cfg(cfg)
+    cfg2 = _override_sizing(cfg2, mode="fixed", fixed_usd=14.0, ioc_slippage_bps=0)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", _xyz_fill(px="1000.0"))
+    exchange.order.assert_called_once()
+    coin, _is_buy, sz, _px = exchange.order.call_args.args[:4]
+    assert coin == "xyz:MU"
+    # $14 / $1000 = 0.014 exactly at 3dp (the old 4dp guess produced 0.0140)
+    assert sz == 0.014
+    assert round(sz % 0.001, 9) == 0  # never finer than szDecimals
+
+
+def test_unknown_xyz_skip_does_not_arm_poison_cooldown(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Skipping must leave the coin CLEAN, so it trades the instant the next
+    HIP-3 refresh registers it — no 300s dead zone."""
+    cfg2 = _perp_cfg(cfg)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", _xyz_fill())
+    assert mt._poison_until == {}
+    market_meta.register_dex_assets([{"name": "xyz:MU", "szDecimals": 3}])
+    mt.on_leader_fill("0xleader", {**_xyz_fill(), "tid": 2002})
+    exchange.order.assert_called_once()
+
+
+def test_unknown_xyz_skip_claims_nothing_and_raises_no_alert(
+    cfg, positions, journal, exchange, market_meta
+):
+    """The skip is a clean no-op: no live order, so the coin must not claim an
+    originator slot (that would block the real originator via the conflict
+    lock), and it must not fire the generic pipeline-exception 'error' alert —
+    this is an expected, handled condition, not a crash.
+
+    It DOES fire one throttled 'warn'. That is deliberate: 0x819d06c0 (our
+    best-evidenced leader) is 64% xyz:SP500, so a stuck registration silently
+    stops us mirroring the leader we most want. Throttling is asserted
+    separately in test_precision_alert_is_throttled_per_coin.
+    """
+    alerter = MagicMock()
+    cfg2 = _perp_cfg(cfg)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", _xyz_fill())
+    exchange.order.assert_not_called()
+    positions.state.set_position_originator.assert_not_called()
+    assert alerter.alert.call_count == 1
+    assert alerter.alert.call_args.args[0] == "warn"
+    assert "szDecimals unknown" in alerter.alert.call_args.args[1]
+
+
+def test_precision_alert_is_throttled_per_coin(
+    cfg, positions, journal, exchange, market_meta
+):
+    """A stuck HIP-3 registration means EVERY fill on that coin skips. Our best
+    leader fires ~13 fills/day on xyz:SP500 and perpDexs failed 215x in August,
+    so an alert per fill would bury real risk alerts. One per coin per window."""
+    alerter = MagicMock()
+    cfg2 = _perp_cfg(cfg)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    for tid in range(2100, 2110):
+        mt.on_leader_fill("0xleader", {**_xyz_fill(), "tid": tid})
+    assert alerter.alert.call_count == 1  # 10 skips, 1 alert
+    exchange.order.assert_not_called()
+
+
+def test_non_dex_perp_still_trades_on_default_precision(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Scope guard: the refusal must NOT spill onto original-dex perps."""
+    cfg2 = _perp_cfg(cfg)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0xleader", {**_xyz_fill(coin="SOMENEWPERP"), "tid": 2003})
+    exchange.order.assert_called_once()
+
+
+# --- per-dex exposure cap (2026-08-15) --------------------------------------
+# Each HIP-3 builder dex settles against its OWN collateral, so a single shared
+# cap charged xyz: orders for risk carried on the base account. Measured live:
+# base at 2.4x maintenance coverage, xyz at 14.6x, and 40 of 40 blocked opens
+# were xyz -- 39 of them xyz:SP500, 64% of our best leader's flow.
+
+def _dexcap_mirror(cfg, exchange, positions, journal, alerter, market_meta,
+                   by_dex, base_cap=100.0, dex_cap=100.0):
+    """`by_dex` maps dex prefix ("" = base) -> gross notional already held."""
+    positions.exposure_usd_for_dex.side_effect = lambda d: by_dex.get(d, 0.0)
+    positions.total_exposure_usd.return_value = sum(by_dex.values())
+    cfg2 = _override_risk(cfg, dry_run=False, max_total_exposure_usd=base_cap,
+                          max_dex_exposure_usd=dex_cap, allowed_market_types=["perp"])
+    market_meta.register_dex_assets(
+        [{"name": "xyz:SP500", "szDecimals": 4}, {"name": "flx:BTC", "szDecimals": 4}]
+    )
+    return MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+
+
+def test_base_exposure_does_not_block_a_dex_order(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """The live bug: base sits at its cap, so an xyz: open is refused even
+    though the xyz clearinghouse holds separate, barely-used collateral."""
+    mt = _dexcap_mirror(cfg, exchange, positions, journal, alerter, market_meta,
+                        by_dex={"": 99.0})
+    mt.on_leader_fill(
+        "0xleader", {"tid": 3001, "coin": "xyz:SP500", "px": "100", "sz": "1", "startPosition": "0", "side": "B"}
+    )
+    exchange.order.assert_called_once()
+
+
+def test_dex_exposure_does_not_block_a_base_order(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Symmetric: a loaded xyz book must not throttle base perps."""
+    mt = _dexcap_mirror(cfg, exchange, positions, journal, alerter, market_meta,
+                        by_dex={"xyz": 99.0})
+    mt.on_leader_fill("0xleader", {"tid": 3002, "coin": "BTC", "px": "100", "sz": "1", "startPosition": "0", "side": "B"})
+    exchange.order.assert_called_once()
+
+
+def test_dex_cap_still_binds_within_its_own_dex(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """This is a risk limit, not a bypass -- xyz still caps xyz."""
+    mt = _dexcap_mirror(cfg, exchange, positions, journal, alerter, market_meta,
+                        by_dex={"xyz": 99.0})
+    mt.on_leader_fill(
+        "0xleader", {"tid": 3003, "coin": "xyz:SP500", "px": "100", "sz": "1", "startPosition": "0", "side": "B"}
+    )
+    exchange.order.assert_not_called()
+
+
+def test_two_dexes_are_capped_independently(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Per-dex, not one shared pool: flx at its limit must not gate xyz."""
+    mt = _dexcap_mirror(cfg, exchange, positions, journal, alerter, market_meta,
+                        by_dex={"flx": 99.0})
+    mt.on_leader_fill(
+        "0xleader", {"tid": 3004, "coin": "xyz:SP500", "px": "100", "sz": "1", "startPosition": "0", "side": "B"}
+    )
+    exchange.order.assert_called_once()
+
+
+# --- leader EXITS were mirrored as ENTRIES (2026-08-15) ----------------------
+# The mirror copied the leader's fill SIDE and never asked whether that fill
+# opened or closed their position. Leader 0x819d06c0 bought to cover a short in
+# xyz:SP500; we bought too, and opened a LONG against their short — 13 mirrored
+# `Close Short` fills left us +0.035 long while they sat -2.801 short. Closed by
+# hand at 15:56, rebuilt itself larger by 18:56. Over that leader's last 2,000
+# fills, 33.5% are exits, so this was a third of everything we copied.
+
+from src.mirror import (  # noqa: E402
+    ACTION_CLOSE,
+    ACTION_FLIP,
+    ACTION_OPEN,
+    ACTION_UNKNOWN,
+    classify_leader_fill,
+)
+
+
+def _close_cfg(cfg):
+    """Perp-enabled, dry_run off, wide bounds so sizing never masks the point."""
+    cfg = _override_risk(cfg, allowed_market_types=["perp"], dry_run=False)
+    return _override_sizing(cfg, min_per_trade_usd=1.0, max_per_trade_usd=1000.0)
+
+
+def _fill(**over):
+    """Leader buys 10 BTC @ 100 → $1000 notional → $100 clip → 1.0 BTC."""
+    base = {"tid": 4001, "coin": "BTC", "px": "100", "sz": "10", "side": "B",
+            "startPosition": "0", "dir": "Open Long"}
+    base.update(over)
+    return base
+
+
+def _mt(cfg, exchange, positions, journal, alerter, market_meta, held=0.0):
+    positions.state.get_position.return_value = (held, 100.0)
+    return MirrorTrader(_close_cfg(cfg), exchange, positions, journal, alerter, market_meta)
+
+
+# --- classification is arithmetic, `dir` is only a cross-check ---------------
+
+@pytest.mark.parametrize(
+    "start_pos,side,sz,expected",
+    [
+        ("0", "B", "10", ACTION_OPEN),      # flat → long
+        ("0", "A", "10", ACTION_OPEN),      # flat → short
+        ("5", "B", "10", ACTION_OPEN),      # add to long
+        ("-5", "A", "10", ACTION_OPEN),     # add to short
+        ("-20", "B", "10", ACTION_CLOSE),   # cover part of a short
+        ("20", "A", "10", ACTION_CLOSE),    # sell part of a long
+        ("-10", "B", "10", ACTION_CLOSE),   # exact full cover is CLOSE, not FLIP
+        ("-2", "B", "10", ACTION_FLIP),     # short → long
+        ("2", "A", "10", ACTION_FLIP),      # long → short
+    ],
+)
+def test_classify_derives_action_from_start_position(start_pos, side, sz, expected):
+    act = classify_leader_fill({"startPosition": start_pos, "side": side, "sz": sz})
+    assert act.action == expected
+    assert act.source == "start_position"
+
+
+def test_classify_full_cover_is_close_despite_float_error():
+    """`sz` and `startPosition` are decimal strings; an exact close must not
+    tip into FLIP on representation error and trigger a spurious entry."""
+    act = classify_leader_fill({"startPosition": "-3.384", "side": "B", "sz": "3.384"})
+    assert act.action == ACTION_CLOSE
+
+
+def test_classify_flip_reports_only_the_opening_portion():
+    act = classify_leader_fill({"startPosition": "-2", "side": "B", "sz": "10"})
+    assert act.action == ACTION_FLIP
+    assert act.open_sz == pytest.approx(8.0)
+
+
+def test_classify_uses_dir_when_start_position_is_absent():
+    act = classify_leader_fill({"side": "B", "sz": "10", "dir": "Close Short"})
+    assert act.action == ACTION_CLOSE
+    assert act.source == "dir"
+
+
+def test_classify_is_unknown_when_both_signals_are_absent():
+    """INV 4: UNKNOWN is never EMPTY. Falling back to 'just mirror the side'
+    is the bug itself, so there is no fallback."""
+    act = classify_leader_fill({"side": "B", "sz": "10"})
+    assert act.action == ACTION_UNKNOWN
+    assert act.source == "none"
+
+
+def test_classify_is_unknown_when_start_position_is_unparseable():
+    act = classify_leader_fill({"startPosition": "n/a", "side": "B", "sz": "10"})
+    assert act.action == ACTION_UNKNOWN
+
+
+def test_classify_ignores_dir_labels_with_no_open_close_meaning():
+    """Spot `Buy`/`Sell` and `Settlement` say nothing about direction, so with
+    no startPosition they stay UNKNOWN rather than being guessed at."""
+    for label in ("Buy", "Sell", "Settlement", ""):
+        act = classify_leader_fill({"side": "B", "sz": "10", "dir": label})
+        assert act.action == ACTION_UNKNOWN, label
+
+
+def test_classify_prefers_arithmetic_and_flags_a_dir_mismatch():
+    act = classify_leader_fill(
+        {"startPosition": "-20", "side": "B", "sz": "10", "dir": "Open Long"}
+    )
+    assert act.action == ACTION_CLOSE   # arithmetic wins (criterion 1)
+    assert act.mismatch is True
+
+
+def test_classify_start_position_true_is_not_a_long():
+    """bool is an int subclass: float(True) == 1.0 would read as a real long."""
+    act = classify_leader_fill({"startPosition": True, "side": "A", "sz": "10"})
+    assert act.action == ACTION_UNKNOWN
+
+
+# --- the headline regression -------------------------------------------------
+
+def test_leader_closes_short_while_we_are_flat_places_no_order(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """THE bug. Leader buys to cover; we bought and opened a long."""
+    mt = _mt(cfg, exchange, positions, journal, alerter, market_meta, held=0.0)
+    mt.on_leader_fill("0xleader", _fill(startPosition="-20", dir="Close Short"))
+    exchange.order.assert_not_called()
+    assert "leader_closing_we_are_flat" in _skip_reasons(journal)
+
+
+def test_live_xyz_sp500_close_short_is_not_mirrored_as_an_entry(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Replay of a real fill from 2026-08-15 (tid 159564698810262)."""
+    market_meta.register_dex_assets([{"name": "xyz:SP500", "szDecimals": 4}])
+    cfg2 = _override_risk(_close_cfg(cfg), max_dex_exposure_usd=1000.0)
+    positions.state.get_position.return_value = (0.0, 0.0)
+    mt = MirrorTrader(cfg2, exchange, positions, journal, alerter, market_meta)
+    mt.on_leader_fill("0x819d06c0", {
+        "tid": 159564698810262, "coin": "xyz:SP500", "px": "7774.0", "sz": "0.583",
+        "side": "B", "startPosition": "-3.384", "dir": "Close Short",
+    })
+    exchange.order.assert_not_called()
+
+
+def test_leader_closes_short_while_we_are_short_reduces_and_clamps(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """We hold the side they are leaving → shrink it, reduce-only, and never
+    flip through zero: the $100 clip is 1.0 BTC but we only hold 0.4."""
+    mt = _mt(cfg, exchange, positions, journal, alerter, market_meta, held=-0.4)
+    mt.on_leader_fill("0xleader", _fill(startPosition="-20", dir="Close Short"))
+    exchange.order.assert_called_once()
+    args, kwargs = exchange.order.call_args
+    coin, is_buy, sz, _px = args[:4]
+    assert coin == "BTC"
+    assert is_buy is True
+    assert sz == pytest.approx(0.4)      # clamped to our position, not 1.0
+    assert kwargs["reduce_only"] is True
+
+
+def test_leader_closes_short_while_we_are_long_places_no_order(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """We are on the wrong side already — usually a position this very bug
+    built. Mirroring their exit here would ADD to it, which criterion 3
+    forbids outright: a CLOSE may never grow our exposure on the coin."""
+    mt = _mt(cfg, exchange, positions, journal, alerter, market_meta, held=1.0)
+    mt.on_leader_fill("0xleader", _fill(startPosition="-20", dir="Close Short"))
+    exchange.order.assert_not_called()
+    assert "leader_closing_we_hold_opposite" in _skip_reasons(journal)
+
+
+def test_leader_closes_long_while_we_are_long_reduces(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Mirror image of the above, so the fix is not buy-side-only."""
+    mt = _mt(cfg, exchange, positions, journal, alerter, market_meta, held=0.3)
+    mt.on_leader_fill(
+        "0xleader", _fill(side="A", startPosition="20", dir="Close Long")
+    )
+    args, kwargs = exchange.order.call_args
+    assert args[1] is False              # SELL
+    assert args[2] == pytest.approx(0.3)
+    assert kwargs["reduce_only"] is True
+
+
+def test_close_mirror_never_increases_absolute_exposure(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Criterion 3, stated directly: whatever the clip size, a close order can
+    never exceed what we hold."""
+    for held in (-0.4, -1.0, -5.0):
+        exchange.order.reset_mock()
+        mt = _mt(cfg, exchange, positions, journal, alerter, market_meta, held=held)
+        mt.on_leader_fill("0xleader", _fill(startPosition="-20", dir="Close Short"))
+        sz = exchange.order.call_args.args[2]
+        assert sz <= abs(held) + 1e-9, held
+
+
+def test_close_that_rounds_to_zero_is_skipped_with_its_own_reason(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """Dust below one szDecimals lot. INV 5: greppable, not silent."""
+    mt = _mt(cfg, exchange, positions, journal, alerter, market_meta, held=-1e-9)
+    mt.on_leader_fill("0xleader", _fill(startPosition="-20", dir="Close Short"))
+    exchange.order.assert_not_called()
+    assert "close_rounds_to_zero" in _skip_reasons(journal)
+
+
+# --- opens are untouched -----------------------------------------------------
+
+def test_leader_opens_short_while_we_are_flat_still_mirrors_short(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    mt = _mt(cfg, exchange, positions, journal, alerter, market_meta, held=0.0)
+    mt.on_leader_fill("0xleader", _fill(side="A", startPosition="0", dir="Open Short"))
+    exchange.order.assert_called_once()
+    args, kwargs = exchange.order.call_args
+    assert args[1] is False              # SELL
+    assert args[2] == pytest.approx(1.0)  # full clip, not clamped
+    assert kwargs["reduce_only"] is False
+
+
+def test_leader_adding_to_a_short_is_an_open_not_a_close(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    mt = _mt(cfg, exchange, positions, journal, alerter, market_meta, held=0.0)
+    mt.on_leader_fill("0xleader", _fill(side="A", startPosition="-5", dir="Open Short"))
+    exchange.order.assert_called_once()
+    assert exchange.order.call_args.args[1] is False
+
+
+# --- flips -------------------------------------------------------------------
+
+def test_flip_closes_ours_fully_then_opens_the_new_direction(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """`Short > Long`: leader left the short and is now long. We close our
+    short outright, then enter long."""
+    mt = _mt(cfg, exchange, positions, journal, alerter, market_meta, held=-0.5)
+    mt.on_leader_fill("0xleader", _fill(startPosition="-2", dir="Short > Long"))
+    assert exchange.order.call_count == 2
+    close_args, close_kwargs = exchange.order.call_args_list[0]
+    assert close_args[1] is True
+    assert close_args[2] == pytest.approx(0.5)    # our whole position
+    assert close_kwargs["reduce_only"] is True
+    open_args, open_kwargs = exchange.order.call_args_list[1]
+    assert open_args[1] is True
+    # Opening portion only: sz 10 - |startPosition| 2 = 8 → $800 → $80 clip.
+    assert open_args[2] == pytest.approx(0.8)
+    # Must NOT be reduce-only: the close's own-fill confirmation arrives over
+    # the WS, so re-deriving it here would read the pre-close short and leave
+    # us flat instead of flipped.
+    assert open_kwargs["reduce_only"] is False
+
+
+def test_flip_while_flat_just_opens_the_new_direction(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    mt = _mt(cfg, exchange, positions, journal, alerter, market_meta, held=0.0)
+    mt.on_leader_fill("0xleader", _fill(startPosition="-2", dir="Short > Long"))
+    exchange.order.assert_called_once()
+    assert exchange.order.call_args.kwargs["reduce_only"] is False
+
+
+# --- fallback and unknown ----------------------------------------------------
+
+def test_absent_start_position_falls_back_to_dir(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """No startPosition, `dir: Close Short`, we are flat → still no entry."""
+    fill = _fill(dir="Close Short")
+    del fill["startPosition"]
+    mt = _mt(cfg, exchange, positions, journal, alerter, market_meta, held=0.0)
+    mt.on_leader_fill("0xleader", fill)
+    exchange.order.assert_not_called()
+    assert "leader_closing_we_are_flat" in _skip_reasons(journal)
+
+
+def test_absent_start_position_with_open_dir_still_trades(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """The other direction of INV 4 — fail-safe must not become never-act."""
+    fill = _fill(dir="Open Long")
+    del fill["startPosition"]
+    mt = _mt(cfg, exchange, positions, journal, alerter, market_meta, held=0.0)
+    mt.on_leader_fill("0xleader", fill)
+    exchange.order.assert_called_once()
+
+
+def test_both_signals_absent_is_skipped_as_unknown(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    fill = _fill()
+    del fill["startPosition"]
+    del fill["dir"]
+    mt = _mt(cfg, exchange, positions, journal, alerter, market_meta, held=0.0)
+    mt.on_leader_fill("0xleader", fill)
+    exchange.order.assert_not_called()
+    assert "unknown_fill_action" in _skip_reasons(journal)
+
+
+def test_dir_mismatch_is_journalled_but_does_not_block_the_trade(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    import json
+    from pathlib import Path
+
+    mt = _mt(cfg, exchange, positions, journal, alerter, market_meta, held=0.0)
+    mt.on_leader_fill("0xleader", _fill(startPosition="0", dir="Close Short"))
+    exchange.order.assert_called_once()   # arithmetic says OPEN, and it wins
+    events = [json.loads(x)["event"] for x in Path(journal.path).read_text().splitlines()]
+    assert "fill_action_mismatch" in events
+
+
+def test_leader_fill_journal_records_the_classification(
+    cfg, positions, journal, alerter, exchange, market_meta
+):
+    """So the exit/entry split is measurable after the fact, per INV 10."""
+    import json
+    from pathlib import Path
+
+    mt = _mt(cfg, exchange, positions, journal, alerter, market_meta, held=-0.4)
+    mt.on_leader_fill("0xleader", _fill(startPosition="-20", dir="Close Short"))
+    entry = next(
+        json.loads(x) for x in Path(journal.path).read_text().splitlines()
+        if json.loads(x)["event"] == "leader_fill"
+    )
+    assert entry["action"] == ACTION_CLOSE
+    assert entry["action_source"] == "start_position"

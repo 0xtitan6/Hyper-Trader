@@ -36,6 +36,11 @@ STATUS_CLOSED = "closed"       # originator flat — they exited
 STATUS_FLIPPED = "flipped"     # originator reversed direction
 STATUS_ORPHAN = "orphan"       # no recorded originator AND no follower holds same direction
 STATUS_UNKNOWN = "unknown"     # fetch failed; preserve last state, don't act
+# Originator is no longer in the followed set — the leader was dropped from
+# config/discovery while we still hold what they opened. Detect-only: this
+# status is produced by `check_dropped_leaders`, never by `reconcile`, and it
+# is deliberately unreachable from the auto-close path (see the docstring).
+STATUS_DROPPED = "dropped_leader_orphan"
 
 
 class LeaderReconciler:
@@ -63,6 +68,7 @@ class LeaderReconciler:
         debounce_cycles: int = 2,
         slippage_bps: float = 50.0,
         manual_holdings: list[str] | None = None,
+        dropped_confirm_passes: int = 2,
     ):
         self.info = info
         self.state = state
@@ -78,6 +84,18 @@ class LeaderReconciler:
         self.manual_holdings: set[str] = {c.lower() for c in (manual_holdings or [])}
         # coin -> consecutive stale cycles
         self._stale_counts: dict[str, int] = {}
+        # Coins already alerted as dropped-leader orphans. A dropped leader is a
+        # STANDING condition, not an event: without this the check would re-fire
+        # on every leader refresh (every 10 min) forever.
+        self._dropped_alerted: set[str] = set()
+        # Confirm a drop across N consecutive checks before alerting. Only
+        # `discovery.top_n` (4) of our ~9 slots are auto-discovered, and those
+        # rotate on rank: a leader can fall out of the top-4 on one refresh and
+        # return on the next. Alerting on a single observation would page the
+        # operator on ordinary leaderboard churn. Counter resets the moment the
+        # originator is followed again, so a flapping leader never accumulates.
+        self.dropped_confirm_passes = max(1, dropped_confirm_passes)
+        self._dropped_pending: dict[str, int] = {}
 
     def reconcile(self, follower_addresses: list[str]) -> dict[str, str]:
         """One reconcile pass. Returns {coin: status} for every open position.
@@ -106,6 +124,145 @@ class LeaderReconciler:
                 self._on_stale(coin, st)
 
         return status
+
+    def check_dropped_leaders(
+        self, followed_addresses: list[str] | None
+    ) -> dict[str, str]:
+        """Flag open positions whose originator is no longer followed.
+
+        `reconcile()` above only ever notices a leader *exiting their own
+        position*. It is structurally blind to a leader being REMOVED from
+        `config.yaml` / dropped by discovery, for two reasons:
+
+          1. it is fed `FillFollower.addresses`, which only ever GROWS —
+             `follow()` has no unsubscribe, so a dropped leader stays in that
+             list for the lifetime of the process; and
+          2. a dropped leader who still holds their position classifies as
+             `ok`, forever.
+
+        So the mirror is simply abandoned. Four of them (JUP, JTO, AR, XMR,
+        from two leaders dropped around July) accumulated unnoticed until
+        2026-08-15, when they held $67.64 initial margin / $344 gross — 100% of
+        base margin — and every signal from our CURRENT leaders was being
+        rejected for want of collateral. They were closed by hand.
+
+        This is DETECT-ONLY and deliberately separate from `reconcile()`:
+
+        - It never calls `_submit_close`. Closing is a money action and stays
+          with the operator; `auto_close` does not reach this path at all.
+        - It never touches `_stale_counts`. Wiring drop-detection into the
+          reconcile cycle would have let a leader refresh and the 5-minute
+          timer fire two "cycles" seconds apart, defeating the debounce that
+          protects the auto-close path from transient false positives.
+        - It needs no network read (state only), so it is safe to call on
+          startup and on every leader refresh.
+
+        Pass the CURRENT followed set (discovery + `always_follow`), NOT
+        `follower.addresses` — see (1) above.
+
+        Returns {coin: status} for every open, non-manual position.
+        """
+        # INV 4: UNKNOWN is never EMPTY. An empty followed set means discovery
+        # failed or returned nothing — it does NOT mean every leader was
+        # dropped. Acting on that reading would flag the entire book at once,
+        # which is precisely the "incomplete leader book → ORPHAN" mistake that
+        # tried to auto-close six live positions on 2026-08-15.
+        followed = {a.lower() for a in (followed_addresses or []) if a}
+
+        status: dict[str, str] = {}
+        # coin -> (originator, sz, avg_px), captured for the alert text so the
+        # report describes the same snapshot the classification was made on.
+        seen: dict[str, tuple[str | None, float, float]] = {}
+        for coin, (our_sz, avg_px) in self.state.get_positions().items():
+            if our_sz == 0:
+                continue
+            # AC-3: operator-managed positions are exempt, same as reconcile().
+            if coin.lower() in self.manual_holdings:
+                continue
+            if not followed:
+                status[coin] = STATUS_UNKNOWN
+                continue
+            originator = self.state.get_position_originator(coin)
+            seen[coin] = (originator, our_sz, avg_px)
+            if originator is None:
+                # Unreadable/unrecorded originator (pre-PR-#25 rows, or a row
+                # whose originator was cleared). We cannot tell whose position
+                # this is, so we cannot call it dropped. UNKNOWN, not DROPPED.
+                status[coin] = STATUS_UNKNOWN
+                continue
+            if originator.lower() in followed:
+                status[coin] = STATUS_OK
+                continue
+            status[coin] = STATUS_DROPPED
+
+        if not followed:
+            log.warning(
+                "leader_reconcile: empty followed set (%d open positions) — "
+                "UNKNOWN this pass, nothing flagged as dropped",
+                len(status),
+            )
+            return status
+
+        # Throttle bookkeeping. Forget coins that are no longer open (or became
+        # manual holdings) so a genuinely new orphan on the same coin re-alerts.
+        live = set(status)
+        self._dropped_alerted &= live
+        self._dropped_pending = {c: n for c, n in self._dropped_pending.items() if c in live}
+        for coin, st in status.items():
+            if st == STATUS_OK:
+                # Leader is followed again (re-added to config, or back in the
+                # top-N) — re-arm and forget any part-accumulated confirmation.
+                self._dropped_alerted.discard(coin)
+                self._dropped_pending.pop(coin, None)
+            elif st == STATUS_DROPPED:
+                # Clamped: once confirmed it stays confirmed, and the counter
+                # must not grow without bound across a long-lived process.
+                n = min(self._dropped_pending.get(coin, 0) + 1, self.dropped_confirm_passes)
+                self._dropped_pending[coin] = n
+                if n < self.dropped_confirm_passes:
+                    log.info(
+                        "leader_reconcile: %s looks orphaned by a dropped leader "
+                        "[pass %d/%d]", coin, n, self.dropped_confirm_passes,
+                    )
+                    continue
+                originator, sz, avg_px = seen[coin]
+                self._report_dropped(coin, originator, sz, avg_px)
+        return status
+
+    def _report_dropped(
+        self, coin: str, originator: str | None, sz: float, avg_px: float
+    ) -> None:
+        """Journal + alert ONCE per coin. Never closes."""
+        if coin in self._dropped_alerted:
+            log.info(
+                "leader_reconcile: %s still orphaned by dropped leader %s "
+                "(already alerted)",
+                coin,
+                (originator or "?")[:10],
+            )
+            return
+        self._dropped_alerted.add(coin)
+        log.warning(
+            "leader_reconcile: %s orphaned — originator %s is no longer followed "
+            "(our_sz=%+.4f avg=$%.4f); NOT auto-closing",
+            coin,
+            (originator or "?")[:10],
+            sz,
+            avg_px,
+        )
+        self.journal.write(
+            STATUS_DROPPED,
+            coin=coin,
+            originator=originator,
+            our_sz=sz,
+            our_avg_px=avg_px,
+        )
+        self.alerter.alert(
+            "error",
+            f"Dropped-leader orphan: {coin} our_sz={sz:+.4f} avg=${avg_px:.4f} — "
+            f"originator {(originator or '?')[:10]} is no longer in the followed "
+            f"set. NOT auto-closed; operator must decide.",
+        )
 
     def _classify(
         self,
@@ -165,22 +322,72 @@ class LeaderReconciler:
                 log.exception("leader_reconcile: unexpected fetch error for %s", addr[:10])
                 continue
             book: dict[str, float] = {}
-            for ap in us.get("assetPositions", []) or []:
-                pos = ap.get("position") if isinstance(ap, dict) else None
-                if not isinstance(pos, dict):
-                    continue
-                coin = pos.get("coin")
-                if not coin:
-                    continue
-                try:
-                    sz = float(pos.get("szi", 0))
-                except (TypeError, ValueError):
-                    continue
-                if sz != 0:
-                    book[coin] = sz
+            self._ingest_positions(us, book)
+            # HIP-3 builder dexes are separate clearinghouses — `user_state`
+            # never returns them. Without this the leader's entire xyz book is
+            # invisible, EVERY xyz mirror we hold classifies as `orphan`, and
+            # auto-close fires on all of them. Observed 2026-08-15: six
+            # simultaneous "Leader exit detected ... orphan" on live positions
+            # the leader still held. The only reason our xyz book survived is
+            # that `_fetch_mid` has no xyz mid and the close failed — an
+            # accident, not a safeguard. Fixing the mid without this would have
+            # force-closed the whole surface.
+            dex_ok = self._ingest_hip3_positions(addr, book)
             out[addr] = book
+            # A dex we could not read means this leader's book is INCOMPLETE.
+            # Recording it as complete would mark live mirrors as orphans, so
+            # drop the leader to UNKNOWN for this cycle instead.
+            if not dex_ok:
+                log.warning(
+                    "leader_reconcile: incomplete HIP-3 book for %s; "
+                    "treating as UNKNOWN this cycle", addr[:10],
+                )
+                out.pop(addr, None)
+                continue
             any_success = True
         return out if any_success else None
+
+    @staticmethod
+    def _ingest_positions(state: dict, book: dict[str, float]) -> None:
+        for ap in (state or {}).get("assetPositions", []) or []:
+            pos = ap.get("position") if isinstance(ap, dict) else None
+            if not isinstance(pos, dict):
+                continue
+            coin = pos.get("coin")
+            if not coin:
+                continue
+            try:
+                sz = float(pos.get("szi", 0))
+            except (TypeError, ValueError):
+                continue
+            if sz != 0:
+                book[coin] = sz
+
+    def _ingest_hip3_positions(self, addr: str, book: dict[str, float]) -> bool:
+        """Add the leader's builder-dex positions. False if any dex was unreadable."""
+        try:
+            dexes = self.info.post("/info", {"type": "perpDexs"})
+        except Exception:
+            log.warning("leader_reconcile: perpDexs fetch failed for %s", addr[:10])
+            return False
+        if dexes is None:
+            return False
+        ok = True
+        for d in dexes:
+            if not isinstance(d, dict) or not d.get("name"):
+                continue
+            name = d["name"]
+            try:
+                st = self.info.post(
+                    "/info",
+                    {"type": "clearinghouseState", "user": addr, "dex": name},
+                )
+            except Exception:
+                log.warning("leader_reconcile: dex=%s state failed for %s", name, addr[:10])
+                ok = False
+                continue
+            self._ingest_positions(st or {}, book)
+        return ok
 
     def _on_stale(self, coin: str, reason: str) -> None:
         count = self._stale_counts.get(coin, 0) + 1
@@ -241,7 +448,7 @@ class LeaderReconciler:
         is_buy = sz < 0  # close a short by buying
         bps = self.slippage_bps / 10_000
         slipped = mid * (1.0 + bps) if is_buy else mid * (1.0 - bps)
-        limit_px = self.market_meta.round_price(slipped)
+        limit_px = self.market_meta.round_price(slipped, coin)
 
         log.warning(
             "leader_reconcile: auto-closing %s reason=%s our_sz=%+.4f mid=$%.4f limit=$%.4f",

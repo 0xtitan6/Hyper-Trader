@@ -6,12 +6,70 @@ Exposes `run_preflight()` returning a PreflightReport. The CLI uses this for
 """
 
 import logging
+import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 log = logging.getLogger(__name__)
 
 REQUIRED_FILL_FIELDS = frozenset({"coin", "px", "sz", "side", "tid", "time", "closedPnl", "fee"})
+
+# Retry budget for each preflight probe. Incident 2026-08-15 03:09 UTC: a
+# deploy ran `--preflight` and then restarted the service within the same
+# minute, so HL rate-limited the back-to-back `meta` + `outcomeMeta` calls
+# (429). Preflight recorded them as hard errors, declared the venue UNHEALTHY
+# and aborted startup — for a condition that clears on its own in seconds.
+# A transient 429 must never be able to stop the engine from booting.
+PREFLIGHT_MAX_ATTEMPTS = 3
+PREFLIGHT_BASE_BACKOFF_S = 2.0
+# Substrings marking an error worth retrying: rate limits and the transient
+# 5xx/gateway family. Anything else (bad address, schema drift) is a real
+# failure and should fail fast rather than burn 3 attempts.
+_TRANSIENT_MARKERS = ("429", "too many requests", "rate limit", "502", "503", "504", "timed out", "timeout")
+
+
+def _is_transient(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(m in text for m in _TRANSIENT_MARKERS)
+
+
+def _probe(
+    fn: Callable[[], Any],
+    *,
+    what: str,
+    errors: list[str],
+    max_attempts: int | None = None,
+    base_backoff_s: float | None = None,
+) -> Any:
+    """Run one preflight probe, retrying transient failures.
+
+    Returns the call's result, or None if every attempt failed (in which case
+    the final error has been appended to `errors`, preserving the previous
+    contract that a failed probe shows up in the report).
+
+    The limits are read from the module constants at CALL time, not bound as
+    argument defaults — otherwise a test that patches the backoff would still
+    sleep for real, which is how this helper's own tests took 10s on the first
+    pass.
+    """
+    if max_attempts is None:
+        max_attempts = PREFLIGHT_MAX_ATTEMPTS
+    if base_backoff_s is None:
+        base_backoff_s = PREFLIGHT_BASE_BACKOFF_S
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001 — every probe failure is reportable
+            if attempt >= max_attempts or not _is_transient(e):
+                errors.append(f"{what}: {type(e).__name__}: {e}")
+                return None
+            backoff = base_backoff_s * (2 ** (attempt - 1))
+            log.warning(
+                "preflight: %s failed transiently (attempt %d/%d), retrying in %.1fs: %s",
+                what, attempt, max_attempts, backoff, e,
+            )
+            time.sleep(backoff)
+    return None
 
 
 @dataclass
@@ -40,30 +98,26 @@ def run_preflight(info: Any, account_address: str) -> PreflightReport:
     api_url = getattr(info, "base_url", "<unknown>")
     r = PreflightReport(api_url=api_url, account_address=account_address)
 
-    try:
-        meta = info.meta() or {}
-        r.perp_markets = len(meta.get("universe", []) or [])
-    except Exception as e:
-        r.errors.append(f"meta: {type(e).__name__}: {e}")
+    meta = _probe(info.meta, what="meta", errors=r.errors) or {}
+    r.perp_markets = len(meta.get("universe", []) or [])
 
-    try:
-        spot = info.spot_meta() or {}
-        r.spot_markets = len(spot.get("universe", []) or [])
-    except Exception as e:
-        r.errors.append(f"spot_meta: {type(e).__name__}: {e}")
+    spot = _probe(info.spot_meta, what="spot_meta", errors=r.errors) or {}
+    r.spot_markets = len(spot.get("universe", []) or [])
 
-    try:
-        outcomes_resp = info.post("/info", {"type": "outcomeMeta"}) or {}
-        r.outcomes = outcomes_resp.get("outcomes", []) or []
-        r.outcome_markets = len(r.outcomes)
-    except Exception as e:
-        r.errors.append(f"outcomeMeta: {type(e).__name__}: {e}")
+    outcomes_resp = _probe(
+        lambda: info.post("/info", {"type": "outcomeMeta"}),
+        what="outcomeMeta",
+        errors=r.errors,
+    ) or {}
+    r.outcomes = outcomes_resp.get("outcomes", []) or []
+    r.outcome_markets = len(r.outcomes)
 
-    try:
-        info.user_state(account_address)
-        r.account_reachable = True
-    except Exception as e:
-        r.errors.append(f"user_state: {type(e).__name__}: {e}")
+    # Reachability is about whether the CALL succeeded, not what it returned —
+    # `user_state` can legitimately answer with a falsy shape. So compare the
+    # error count either side of the probe rather than inspecting the result.
+    errors_before = len(r.errors)
+    _probe(lambda: info.user_state(account_address), what="user_state", errors=r.errors)
+    r.account_reachable = len(r.errors) == errors_before
 
     try:
         fills = info.user_fills(account_address) or []

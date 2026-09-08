@@ -74,7 +74,11 @@ T+24h        Daily reconcile:
 Things you should *expect* to see in the logs (not panic about):
 
 - `WS stale: no messages in 121s` followed by `WS connection recovered` — Hyperliquid's WebSocket disconnects roughly every 30 minutes. Backfill via REST catches anything missed. As long as recovery follows within ~30s, this is normal.
-- `intent_skipped reason: filter` — leader traded on a market type your config blocks (e.g. they traded HIP-4 outcomes but you have `allowed_market_types: [perp]`). This is correct behavior.
+- `intent_skipped reason: market_type` — leader traded on a market type your config blocks (e.g. they traded HIP-4 outcomes but you have `allowed_market_types: [perp]`). This is correct behavior.
+- `intent_skipped reason: sub_min` — the weighted clip came out under `min_per_trade_usd`. Correct, but if it dominates your journal your `fixed_usd`/`proportional_fraction` is too small for the configured minimum and that leader is effectively muted.
+- `intent_skipped reason: funding_skip` — adverse funding above `funding_skip_threshold_apr_pct`. Correct behavior.
+- `intent_skipped reason: rounding:exceeds_max` — the smallest order that clears the venue minimum would breach `max_per_trade_usd`. Raise `max_per_trade_usd` or accept that this asset is untradable at your size.
+- `size_rounded_up` — the sub-minimum rescue fired: we bumped one szDecimals step (or as few as needed) so the order clears the $10 venue minimum. A steady trickle is normal; a flood means your clip sits right on `min_per_trade_usd`.
 - `risk_check ok: false reason: exposure_cap` — bot tried to mirror but you're at your `max_total_exposure_usd`. Increase the cap or wait for a position to close. Not a bug.
 - `Quality filter rejected N candidates` — most of the HL leaderboard gets rejected by the quality filter. That's the point.
 
@@ -125,7 +129,7 @@ Don't drop `min_direction_consistency` below 0.55 — anyone closer to 0.5 is ma
 
 ### When the leaderboard is dominated by outcome traders
 
-If your bot is running with `allowed_market_types: [perp]` and nearly every `leader_fill` becomes `intent_skipped: filter`, your leaders are HIP-4 outcome traders, not perp traders. Two paths:
+If your bot is running with `allowed_market_types: [perp]` and nearly every `leader_fill` becomes `intent_skipped: market_type`, your leaders are HIP-4 outcome traders, not perp traders. Two paths:
 
 1. Fund USDH on spot and add `outcome` to `allowed_market_types` — but be aware HIP-4 outcomes have thin books and a worse track record for mirroring. Read [docs/HIP4_GREEKS.md](docs/HIP4_GREEKS.md) before doing this.
 2. Use a perp-bias score filter that re-computes leader metrics over perp fills only. Watch the project's PR list for `score_perp_only` / `min_perp_fraction` — these knobs filter for leaders whose *perp activity* meets quality, not their full portfolio.

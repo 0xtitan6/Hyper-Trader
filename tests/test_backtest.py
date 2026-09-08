@@ -186,3 +186,101 @@ def test_skips_malformed_numeric_fields():
     ]
     r = simulate_leader("0xabc", 1.0, fills=fills, **_baseline_kwargs())
     assert r.trades == 1
+
+
+# ---------- fetch_fills pagination (2026-08-21) ----------
+#
+# The backtest is the only thing that can falsify a discovery result, so it has
+# to read the same history discovery reads. Both now go through
+# `hl_fills.paginate_user_fills`. Unpaginated, `0x7177edd4` (30,127 trades)
+# backtested at 0 trades / 0 closes / $0.00 — which reads as "no edge" but was
+# only "we stopped reading at row 2,000".
+
+import pytest
+
+from src.backtest import fetch_fills
+from src.hl_fills import HL_FILL_PAGE_LIMIT
+
+
+class _FakeUrlopen:
+    """Serves userFillsByTime pages: ascending, <= limit, startTime INCLUSIVE."""
+
+    def __init__(self, fills, limit=HL_FILL_PAGE_LIMIT, fail_on_call=None):
+        self.fills = sorted(fills, key=lambda f: f["time"])
+        self.limit = limit
+        self.fail_on_call = fail_on_call
+        self.calls = 0
+
+    def __call__(self, req, timeout=None):
+        import json as _json
+
+        self.calls += 1
+        if self.fail_on_call == self.calls:
+            raise RuntimeError("connection reset")
+        start = _json.loads(req.data)["startTime"]
+        page = [f for f in self.fills if f["time"] >= start][: self.limit]
+        return _Resp(_json.dumps(page).encode())
+
+
+class _Resp:
+    def __init__(self, body):
+        self.body = body
+
+    def read(self):
+        return self.body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _bt_fill(t: int) -> dict:
+    return {"coin": "SOL", "time": t, "tid": t, "px": "100", "sz": "1",
+            "closedPnl": "0", "fee": "0.045", "dir": "Open Long", "side": "B"}
+
+
+def test_backtest_fetch_fills_paginates(monkeypatch):
+    import src.backtest as bt
+
+    fills = [_bt_fill(i + 1) for i in range(HL_FILL_PAGE_LIMIT + 133)]
+    fake = _FakeUrlopen(fills)
+    monkeypatch.setattr(bt.urllib.request, "urlopen", fake)
+    got = fetch_fills("0xabc", 0)
+    assert len(got) == HL_FILL_PAGE_LIMIT + 133
+    assert fake.calls > 1
+
+
+def test_backtest_fetch_fills_dedupes_boundary(monkeypatch):
+    import src.backtest as bt
+
+    fills = [_bt_fill(i + 1) for i in range(HL_FILL_PAGE_LIMIT + 4)]
+    monkeypatch.setattr(bt.urllib.request, "urlopen", _FakeUrlopen(fills))
+    got = fetch_fills("0xabc", 0)
+    assert len({f["tid"] for f in got}) == len(got)
+
+
+def test_backtest_fetch_fills_raises_on_partial_window(monkeypatch):
+    """A partial backtest is a wrong number, not a smaller one (INV 4). It must
+    fail loudly rather than report a leader as edgeless."""
+    import src.backtest as bt
+
+    fills = [_bt_fill(i + 1) for i in range(HL_FILL_PAGE_LIMIT + 10)]
+    monkeypatch.setattr(bt.urllib.request, "urlopen",
+                        _FakeUrlopen(fills, fail_on_call=2))
+    with pytest.raises(Exception):
+        fetch_fills("0xabc", 0)
+
+
+def test_backtest_fetch_fills_single_page_unchanged(monkeypatch):
+    """Windows that already fitted in one page must return exactly what they
+    returned before — the existing leader numbers must not move."""
+    import src.backtest as bt
+
+    fills = [_bt_fill(i + 1) for i in range(868)]
+    fake = _FakeUrlopen(fills)
+    monkeypatch.setattr(bt.urllib.request, "urlopen", fake)
+    got = fetch_fills("0xabc", 0)
+    assert len(got) == 868
+    assert fake.calls == 1

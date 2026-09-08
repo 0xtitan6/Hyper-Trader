@@ -6,7 +6,7 @@ Audience: an LLM that is *watching* a running hyper-trader instance (not editing
 
 | Source | What it tells you |
 |---|---|
-| `state/journal.jsonl` | Append-only event log: `leader_fill`, `intent_skipped`, `risk_check`, `order_dry_run`, `order_result`, `order_failed`, `pipeline_error`, `own_fill`, `startup`, `shutdown`. |
+| `state/journal.jsonl` | Append-only event log: `leader_fill`, `intent_skipped`, `size_rounded_up`, `risk_check`, `order_dry_run`, `order_result`, `order_failed`, `pipeline_error`, `own_fill`, `startup`, `shutdown`. `intent_skipped.reason` is one of `market_type`, `sub_min`, `funding_skip`, `rounding:exceeds_max`, `bad_fill_numbers`, `bad_fill_fields`, `bad_sizing_mode`, `leader_conflict:…` — never a generic token. |
 | stdout / log file | Real-time bot logs — includes `[ALERT …]` lines, WS health, market meta loads, backfill counts. |
 | `state/state.db` (sqlite) | `seen_tids`, `own_fills`, `positions`, `daily_pnl` queries. |
 | Hyperliquid REST | `info.user_state(addr)` for an authoritative position cross-check. |

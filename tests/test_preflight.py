@@ -135,3 +135,62 @@ def test_format_report_unhealthy_shows_errors():
     assert "ERRORS:" in out
     assert "✗ meta: bad" in out
     assert "UNHEALTHY" in out
+
+
+# --- transient-failure retry (incident 2026-08-15 03:09 UTC) -----------------
+# A deploy ran `--preflight` then restarted the service inside the same minute.
+# HL rate-limited the back-to-back meta calls (429), preflight recorded them as
+# hard errors and ABORTED STARTUP. The venue was fine seconds later. A
+# transient 429 must never be able to stop the engine booting.
+
+
+def test_transient_429_is_retried_and_succeeds(monkeypatch):
+    monkeypatch.setattr("src.preflight.PREFLIGHT_BASE_BACKOFF_S", 0.0)
+    info = _info()
+    info.meta.side_effect = [
+        RuntimeError("ClientError: (429, None, 'null', None, {})"),
+        {"universe": [{"name": "BTC"}, {"name": "ETH"}]},
+    ]
+    r = run_preflight(info, "0xabc")
+    assert r.perp_markets == 2
+    assert r.errors == []
+    assert r.healthy
+    assert info.meta.call_count == 2
+
+
+def test_transient_429_gives_up_after_max_attempts(monkeypatch):
+    monkeypatch.setattr("src.preflight.PREFLIGHT_BASE_BACKOFF_S", 0.0)
+    info = _info()
+    info.meta.side_effect = RuntimeError("ClientError: (429, None, 'null', None, {})")
+    r = run_preflight(info, "0xabc")
+    assert not r.healthy
+    assert any("meta:" in e for e in r.errors)
+    assert info.meta.call_count == 3  # PREFLIGHT_MAX_ATTEMPTS
+
+
+def test_non_transient_error_fails_fast_without_retrying(monkeypatch):
+    """A bad address or schema drift is real — don't burn 3 attempts on it."""
+    monkeypatch.setattr("src.preflight.PREFLIGHT_BASE_BACKOFF_S", 0.0)
+    info = _info()
+    info.meta.side_effect = ValueError("malformed response")
+    r = run_preflight(info, "0xabc")
+    assert not r.healthy
+    assert info.meta.call_count == 1
+
+
+def test_user_state_reachability_survives_a_transient_blip(monkeypatch):
+    monkeypatch.setattr("src.preflight.PREFLIGHT_BASE_BACKOFF_S", 0.0)
+    info = _info()
+    info.user_state.side_effect = [RuntimeError("503 Service Unavailable"), {"assetPositions": []}]
+    r = run_preflight(info, "0xabc")
+    assert r.account_reachable
+    assert r.errors == []
+
+
+def test_user_state_falsy_result_still_counts_as_reachable(monkeypatch):
+    """Reachability is about the call succeeding, not what it returned."""
+    monkeypatch.setattr("src.preflight.PREFLIGHT_BASE_BACKOFF_S", 0.0)
+    info = _info()
+    info.user_state.return_value = {}
+    r = run_preflight(info, "0xabc")
+    assert r.account_reachable
