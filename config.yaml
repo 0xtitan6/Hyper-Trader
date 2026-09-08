@@ -707,6 +707,41 @@ discovery:
     # drift and makes the leader permanently visible to future backtests.
     # Size change is ~1%: $30*1.10 = $33.00, well clear of min_per_trade_usd $10.
     "0xa3f996f2ec2b1fe240a57543bbfdb4d9d5804d04": 1.10
+    # 2026-09-08 AUTO-DISCOVERED leader, NOT pinned. Explicit weight override to
+    # cut its auto-Sharpe weight 1.16 -> 0.70 (-0.46, within the +/-0.5/run bound).
+    # Same blind spot as 0x9636dc55/0xa3f996f2: it has been trading LIVE at 1.16
+    # -- the second-largest weight in the book -- on ZERO backtest evidence,
+    # because src/backtest.py only scores always_follow. main.log showed it top
+    # of every "Selected 4/50" line (rank=14, pnl=$7531, trades=58). Backtested
+    # in isolation this run via a temp config:
+    #   30d @ $472.26 proxy: 186 trades / 94 closes, 54% hit, net +$7.22,
+    #   sharpe +0.27, maxDD $1.42 = 0.20x net, +$0.08/trade.
+    # STEP-2 IS CLEAN -- this is NOT a bag-holder: xyz equity $2,498.22, ONE
+    # position (xyz:SP500 short 3.25 @ 7706.715), unrealized -$5.80 = -0.2% of
+    # equity, 10.0x. base/para/io all flat. Funded, solvent, nothing warehoused.
+    # WHY CUT ANYWAY -- it is a KEEPER by the letter of Step-3 (net>0, sharpe
+    # 0.27>0.1, maxDD 0.20x<2x net) but the MAGNITUDE does not justify a
+    # top-weight slot. At essentially the same weight, peers earn 9-15x more:
+    #   0x511e60d3  1.10 -> +$109.55      0xa3f996f2  1.10 -> +$64.19
+    #   0x7d7c7d28  1.16 -> +$7.22   (= $0.24/day, below the noise floor)
+    # And the $7,531 leaderboard PnL that WON it the 1.16 auto-weight is stale
+    # and concentrated: 08-13 +$3,701, 08-14 +$2,199, 08-24 +$2,072, 08-15
+    # +$1,631 = 103.5% of its 30d total from four days, with 09-02 -$428.98 and
+    # the whole of September ~flat. Auto-Sharpe weighting cannot see either the
+    # day-concentration or the thin copy-edge, so it sizes on a stale spike.
+    # This is a size-right, NOT a LOSER cut -- the slot stays and the leader
+    # keeps trading. Keeping the explicit entry is also the only brake: like
+    # 0x9636dc55, DELETING this line does not remove the leader, src/leaders.py
+    # falls back to auto-Sharpe and it BUMPS straight back to ~1.16.
+    # Mute check: $30 * 0.70 = $21.00 clip. Verified against real szDecimals=3
+    # after floor-rounding: xyz:SP500 @ $7,708.45 -> 0.003 = $23.13 (0.002 =
+    # $15.42 worst case), xyz:SKHX @ $1,385.65 -> 0.015 = $20.78. Both clear
+    # min_per_trade_usd $10 and sit under max_per_trade_usd $120. Reduced, NOT
+    # silently muted by rounding.
+    # Re-bump condition: net$ back above ~$50/30d with sharpe >=0.2, driven by
+    # days OUTSIDE the 08-13..08-24 spike. If net goes negative next window it
+    # is a clean LOSER cut toward 0.
+    "0x7d7c7d28e2061b30887c94b0623ed49c59f6d19c": 0.70
     # Dropped from always_follow 2026-07-20 (0 trades / dead slot).
     # "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8": 1.2
 
