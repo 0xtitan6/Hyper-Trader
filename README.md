@@ -109,22 +109,42 @@ For testnet drips: <https://app.hyperliquid-testnet.xyz/drip> (requires a prior 
 
 ### 4. Run
 
-```bash
-# Full copy-bot (preflight first, then trade)
-just run
-.venv/bin/python -m src.main --preflight       # preflight only
-.venv/bin/python -m src.main --skip-preflight  # bypass gate (not recommended)
+> **The engine is owned by systemd. Never hand-start it.**
+> `Restart=always` means a manual launch runs *alongside* the service — two live
+> engines, double-trading real money. This happened on 2026-08-14. See
+> [`INVARIANTS.md`](INVARIANTS.md) INV 6.
 
-# Outcome maker (separate process, one outcome leg)
+```bash
+sudo systemctl status hyper-trader     # state
+sudo systemctl restart hyper-trader    # apply a config change
+sudo journalctl -u hyper-trader -f     # follow
+
+# ALWAYS verify exactly one engine after any restart:
+ps -eo pid,cmd | grep '[s]rc.main' | wc -l     # must be 1
+```
+
+`systemctl is-active` is **not** proof we are trading — an aborted startup used to
+keep its PID alive and report healthy while trading nothing (INV 7). Confirm
+`Following N leaders` in `state/main.log`.
+
+Do **not** run `--preflight` and then restart within the same minute: HL
+rate-limits the back-to-back `meta` calls and the 429 aborts startup.
+
+Never run `python -m src.main` to test something. Environment variables do **not**
+override the API URL (it comes from `network.hyperliquid_env`), so it starts a
+REAL LIVE ENGINE against the real account (INV 8).
+
+**Side strategies** (separate processes, separate subaccount, not systemd-managed):
+
+```bash
+# Outcome maker — dry-run by default, never run live on the main account
 .venv/bin/python -m src.maker --coin "#20" \
   --expiry 2026-05-06T06:00:00+00:00 \
   --min-spread-bps 30 --quote-size 1 \
-  --max-position 20 --max-inventory-usd 5 \
-  --dry-run                                   # remove for live
+  --max-position 20 --max-inventory-usd 5 --dry-run
 
-# Endgame strategy (time-decay capture near binary expiry)
-.venv/bin/python -m src.endgame \
-  --target 79980 --expiry 2026-05-06T06:00:00+00:00
+# Endgame (time-decay capture near binary expiry)
+.venv/bin/python -m src.endgame --target 79980 --expiry 2026-05-06T06:00:00+00:00
 ```
 
 In dry-run mode, logs show intended trades but never submit:
@@ -185,6 +205,11 @@ Test layout:
 
 ## Documentation
 
+| Doc | Why you would read it |
+|---|---|
+| [`INVARIANTS.md`](INVARIANTS.md) | **13 rules that cost real money to learn.** Read before changing positions, risk or sizing. A change that violates one is wrong even with green tests. |
+| [`BACKLOG.md`](BACKLOG.md) | Work queue. Items carry acceptance criteria concrete enough to check without asking. |
+
 For LLM agents driving the bot or contributors landing changes:
 
 - **[AGENTS.md](AGENTS.md)** — operator runbook for autonomous *coding* agents (e.g. Cursor, Claude Code editing this repo). Setup, secret-handling rules, NEVER-DO list, code-edit conventions.
@@ -194,6 +219,23 @@ For LLM agents driving the bot or contributors landing changes:
 - **[docs/HIP4_STRIP_DESIGN.md](docs/HIP4_STRIP_DESIGN.md)** — design doc (not implementation) for synthesizing vanilla-option-like exposure from binary strips. Build trigger: HL launches multi-strike outcome ladders.
 - **[docs/UPSTREAM_HL_SDK_HIP4_PATCH.md](docs/UPSTREAM_HL_SDK_HIP4_PATCH.md)** — ready-to-file upstream PR for `hyperliquid-dex/hyperliquid-python-sdk` adding native HIP-4 support.
 
+## Multi-dex reality (read before touching positions or risk)
+
+Hyperliquid is **not one clearinghouse**. Each HIP-3 builder dex (`xyz:`, `para:`,
+`io:`, …) settles against its own collateral.
+
+- `info.user_state()` returns **base-dex positions only.** Code that reads
+  positions from it alone is wrong. This same bug shipped in four separate
+  modules (INV 1). Enumerate via `perpDexs`, then `clearinghouseState{user, dex}`.
+- Risk limits bucket **per dex** — never summed. A shared exposure cap once
+  blocked 40 of 40 opens because a different, more-levered book was full (INV 2).
+- Free collateral is unencumbered **spot USDC**, not perp `withdrawable` — the
+  latter reads `$0.00` whenever no base position is open, which is "nothing held
+  yet", not "no money" (INV 3).
+
+[`INVARIANTS.md`](INVARIANTS.md) has all 13 rules, each with the date it broke
+and what it cost. Read it before changing anything in positions, risk or sizing.
+
 ## Limits and known gaps
 
 - **WS user-sub cap**: Hyperliquid allows max 10 unique users per IP for `userFills` subs and the bot's own-fill subscription consumes 1 — `discovery.top_n` is capped at **9** by `load_config`.
@@ -202,9 +244,9 @@ For LLM agents driving the bot or contributors landing changes:
 - **HL Spot Dusting auto-converts USDH → USDC** unless disabled in HL UI settings — operator action required for sustained outcome trading.
 - **Single-binary Greeks are non-vanilla** — humped delta, sign-flipping gamma/vega/theta. Don't size single-binary inventory using vanilla-option intuition. See [`docs/HIP4_GREEKS.md`](docs/HIP4_GREEKS.md).
 - **Exposure is cost-basis, not mark-to-market**: for fully-collateralized HIP-4 outcomes that's the actual max loss; for perps it under-counts what a liquidation could cost.
-- **Copy-bot mirroring has a structural EV gap on outcome closes** — a leader's edge is in their entries (which we missed by the time we subscribe); their exits are at fair odds. Mirroring leader sells without inventory opens fresh shorts at ~zero EV. Open-vs-close detection is a known follow-up.
+- ~~Open-vs-close detection is a known follow-up~~ **FIXED 2026-08-15.** The diagnosis was right and the cost was worse than described: we mirrored a leader's *exits as entries* on perps too. A leader buying to cover a short made us buy and open a long. ~33% of copied fills are exits. `mirror.classify_leader_fill` now derives OPEN/CLOSE/FLIP from `startPosition` arithmetic; a CLOSE while we are flat places no order.
 - **Maker uses REST polling, not WebSocket book updates** — refresh interval default 2s. Lower-latency WS-driven version is a follow-up.
-- **No backtest harness** in v1 — testnet is the validation environment.
+- Backtesting: `src/backtest.py` (copy-trade sim) and `scripts/realized_pnl.py` (realized PnL by surface, with a significance test). **`src/backtest.py` scores only `closedPnl`** — a wallet that averages down and closes only winners backtests perfectly while drowning, so always cross-check `clearinghouseState` unrealized (INV 9).
 - **No order idempotency via `cloid`** — a crash between submit and journal-write means restart-time reconciliation isn't possible. Fine for low-frequency outcome trading; would matter for HFT.
 - **No portfolio margin awareness** — short-strip strategies (when they become buildable) require operator-managed capital reservations.
 
