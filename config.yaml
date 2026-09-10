@@ -459,6 +459,27 @@ discovery:
     # gross $25,375.87 = 5.1x, unrealized -$78.46 = -1.6% of equity.
     # Not a LOSER (net>0, sharpe>0.1, maxDD<2x net) so no cut; but forward edge
     # is unproven now that SKHX is flat, so no bump either.
+    # 2026-09-10 HOLD at 1.25 (fourth consecutive hold, same documented reason).
+    # Tops the book on risk-adjusted evidence again: 30d @ $485.11 proxy =
+    # 609 trades / 141 closes, 89% hit, net +$119.05, sharpe +1.18 (best in
+    # book), maxDD $1.53 = 0.013x net, +$0.85/trade.
+    # Step-2 is CLEAN this run and, unlike 08-29/08-30, POSITIVE: xyz equity
+    # $8,640.96 / gross $41,583.00 = 4.81x, ONE position (xyz:SKHX +30.0 @ 5x
+    # ISOLATED), unrealized +$418.20 = +4.8% of equity. base/para/io flat --
+    # per INV 1 that is normal, the wallet lives on xyz. Equity clears the
+    # $500 solvency gate 17x. So the 89%-hit / near-zero-maxDD signature is
+    # NOT a closedPnl illusion this window.
+    # NO BUMP REGARDLESS -- the 08-25 pre-commitment is "bump only on a second
+    # independent positive window on a DIFFERENT symbol", and that is still
+    # unmet: xyz:SKHX is +$118.51 of the +$119.05 net = 99.5% single-symbol.
+    # This leader has never once been measured on a second symbol.
+    # The 08-25 surface constraint also still binds: "do not size further into
+    # [xyz] until the reconcile fix lands" -- reconcile/leader_reconcile still
+    # zero xyz positions each cycle (escalated 2026-08-15, awaiting Titan).
+    # Note the live-selection line reads rank=-1, pnl=$0, trades=0: that is
+    # leaderboard ABSENCE, not a dead slot (609 backtested trades + a funded
+    # $8.6k wallet with an open position). It is in the book only because it
+    # is pinned, which is exactly why it was pinned.
     "0x9551e7d4cd963558bb9882aecc74f549262e217f": 1.25
     # 2026-08-25: pinned this run (see always_follow). Weight set to 1.27,
     # which is EXACTLY where auto-sharpe weighting already had it
@@ -634,6 +655,30 @@ discovery:
     # Mute check: $30 * 1.10 = $33.00 clip, clears min_per_trade_usd $10 after
     # floor-rounding and is under max_per_trade_usd $120. Real size cut, NOT a
     # silent mute-by-rounding.
+    # 2026-09-10 HELD at 1.10 -- re-bump bar met on ONE leg of two, so no bump.
+    # The 09-02/09-03 condition is an AND: "sharpe back above ~0.2 AND maxDD
+    # back under ~0.3x net".
+    # 30d @ $485.11 proxy: 783 trades / 208 closes, 69% hit, net +$134.60,
+    # sharpe +0.23, maxDD $45.27 = 0.336x net, +$0.65/trade.
+    #   sharpe    >= 0.2  ->  +0.23   MET (first time in four windows)
+    #   maxDD/net <  0.3x ->  0.336x  MISSED (needs maxDD <= $40.38)
+    # Recovery is real and broad, not one symbol: net +$61.25 -> +$134.60
+    # (+120%), sharpe +0.11 -> +0.23, maxDD/net 0.83x -> 0.336x, hit 64% ->
+    # 69%. It now tops the book on net$, reversing three windows of decay.
+    # This is the SECOND consecutive run meeting sharpe-only (see 09-05).
+    # Holding anyway: the bar was written as an AND precisely to stop this
+    # weight churning on partial evidence, and re-sizing this leader has been
+    # the book's most-repeated mistake. It also remains the highest-turnover
+    # leader we copy (783 trades/30d) at the largest live weight in what is
+    # currently a 2-leader live book, and maxDD $45.27 is 9.3% of the $485.11
+    # account -- the largest drawdown line in the book by 16x.
+    # Step-2 CLEAN and strongly positive: base $2,495.76 eq / $16,445.72 gross
+    # = 6.6x, unrealized +$3,172.18; xyz $9,828.10 eq / $83,058.52 = 8.5x,
+    # +$1,812.21 across 15 positions; para $284.33 eq / $1,674.74 = 5.9x,
+    # +$83.11. Combined equity $12,608.19, unrealized +$5,067.50 = +40.2% of
+    # equity over 19 positions = not averaging down, not a closedPnl illusion.
+    # Re-bump condition UNCHANGED: sharpe >=0.2 AND maxDD <0.3x net in the
+    # SAME window. If the next window clears both, bump 1.10 -> 1.50.
     "0x511e60d32a1fdcafb46bae7f43cfab0a87040713": 1.10
     # 2026-09-01 AUTO-DISCOVERED leader, NOT pinned. Explicit weight override to
     # cut its auto-Sharpe weight 1.32 -> 0.85 (-0.47, within the +/-0.5/run bound).
@@ -689,6 +734,22 @@ discovery:
     # weighting, clip(0.88 + 1.0) = 1.88, i.e. a 2.1x BUMP. The explicit low
     # override IS the brake. Next run: if the HYPE short is finally closed at a
     # loss it lands in net$ and this becomes a clean LOSER cut toward 0.
+    # 2026-09-10 HOLD at 0.45 -- STEP-2 REJECT, no bump despite a strong table.
+    # The backtest alone would argue for a bump: 30d @ $485.11 proxy = 283
+    # trades / 154 closes, 64% hit, net +$38.11, sharpe +0.86 (2nd best in
+    # book), maxDD $2.81 = 0.074x net. KEEPER on every Step-3 leg.
+    # Step-2 VETOES it: base equity $1,027.72, ONE position (HYPE short
+    # -123.21 @ 10x CROSS), unrealized -$372.79 = -36.3% of equity -- still
+    # ABOVE the ~30%-of-equity reject threshold. The realized +$38.46 on HYPE
+    # is winners-only and EXCLUDES the -$372.79 still open on that same
+    # symbol; maxDD $2.81 is not risk-free, it is un-realized risk. This is
+    # the exact pattern Step-2 exists to catch.
+    # Direction is improving (-69.3% -> -36.3% of equity since 09-06) and the
+    # wallet is solvent, so this is a HOLD, not a further cut.
+    # Re-bump condition: unrealized loss back under ~30% of equity AND net$
+    # still positive -- i.e. the HYPE short actually realized, not just marked
+    # better. Leaving the explicit entry in place is also the only brake:
+    # deleting this line falls back to auto-Sharpe and BUMPS it to ~1.88.
     "0x9636dc553bb96c4870529af4c60f6701fab001dd": 0.45
 
     # 0xa3f996f2 PINNED 2026-09-06 at its current auto weight. It was dropped
@@ -706,6 +767,17 @@ discovery:
     # BTC leg and ~100% of its net from HYPE. Pinning 1.11 -> 1.10 caps that
     # drift and makes the leader permanently visible to future backtests.
     # Size change is ~1%: $30*1.10 = $33.00, well clear of min_per_trade_usd $10.
+    # 2026-09-10 HOLD at 1.10 (brake unchanged). KEEPER on every leg: 30d @
+    # $485.11 proxy = 545 trades / 207 closes, 63% hit, net +$60.82, sharpe
+    # +0.31, maxDD $34.49 = 0.57x net, +$0.30/trade.
+    # Step-2 CLEAN, not a bag-holder: base equity $10,297.09 / gross
+    # $102,569.12 = 9.96x, unrealized +$7,011.52 = +68.1% of equity (a GAIN).
+    # But the composition argues against any bump: that +$7,011 is ONE winner
+    # (ZEC +$8,636.20) masking three losers (HYPE -$740.76, PUMP -$706.98,
+    # BTC -$176.94 on a 40x leg), and ~100% of backtest net is again a single
+    # symbol (HYPE +$60.77 of +$60.82) -- the concentration flagged on 09-06.
+    # Not selected live this cycle (main.log: "Selected 2/50"); the 1.10
+    # override stays as the brake on auto-Sharpe drift when it rotates back.
     "0xa3f996f2ec2b1fe240a57543bbfdb4d9d5804d04": 1.10
     # 2026-09-08 AUTO-DISCOVERED leader, NOT pinned. Explicit weight override to
     # cut its auto-Sharpe weight 1.16 -> 0.70 (-0.46, within the +/-0.5/run bound).
@@ -741,6 +813,20 @@ discovery:
     # Re-bump condition: net$ back above ~$50/30d with sharpe >=0.2, driven by
     # days OUTSIDE the 08-13..08-24 spike. If net goes negative next window it
     # is a clean LOSER cut toward 0.
+    # 2026-09-10 HOLD at 0.70. Re-bump condition ("net$ back above ~$50/30d
+    # with sharpe >=0.2, driven by days outside the 08-13..08-24 spike") NOT
+    # met, and moving the wrong way: 30d @ $485.11 proxy = 245 trades / 119
+    # closes, 55% hit, net +$4.32, sharpe +0.23, maxDD $0.98 = 0.23x net,
+    # +$0.04/trade = $0.14/day. Net DECAYED -40% (+$7.22 -> +$4.32) in a
+    # window where the book totalled +$356.91. The sharpe leg is met; the net
+    # leg is missed by 11x. The bar is an AND, so no bump.
+    # Not a LOSER cut either (net>0, maxDD 0.23x < 4x net), and it is not
+    # selected live right now ("Selected 2/50" -- it has rotated out of
+    # discovery), so this weight is inert until it returns.
+    # Step-2 CLEAN but carries the highest leverage in the book: xyz equity
+    # $842.12, ONE position (xyz:SP500 short -2.25 @ 20x cross), unrealized
+    # -$17.10 = -2.0% of equity. 20.4x is 2.1x the next-highest leader.
+    # Pre-committed trigger unchanged: next NEGATIVE net window = cut to 0.
     "0x7d7c7d28e2061b30887c94b0623ed49c59f6d19c": 0.70
     # Dropped from always_follow 2026-07-20 (0 trades / dead slot).
     # "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8": 1.2
