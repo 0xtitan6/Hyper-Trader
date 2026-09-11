@@ -778,7 +778,29 @@ discovery:
     # symbol (HYPE +$60.77 of +$60.82) -- the concentration flagged on 09-06.
     # Not selected live this cycle (main.log: "Selected 2/50"); the 1.10
     # override stays as the brake on auto-Sharpe drift when it rotates back.
-    "0xa3f996f2ec2b1fe240a57543bbfdb4d9d5804d04": 1.10
+    # 2026-09-11 CUT 1.10 -> 0.60 (-0.50, the max per-run bound). STEP-2 NOW
+    # REJECTS THIS LEADER. The 09-06 and 09-10 entries above both cleared
+    # Step-2 on a POSITIVE unrealized (+54.5%, then +68.1% of equity) while
+    # noting that the gain was ONE winner (ZEC +$8,636.20) masking three
+    # losers (HYPE, PUMP, BTC-on-a-40x-leg). That is exactly what happened:
+    # the ZEC leg is now GONE from the book and only the three losers remain.
+    #   09-10: equity $10,297.09, unrealized +$7,011.52 (+68.1% of equity)
+    #   09-11: equity  $4,971.12, unrealized -$4,332.63 (-87.2% of equity)
+    #   BTC   +0.31653 @ 78980   -$720.74   40x
+    #   HYPE  +288.24  @ 86.7559 -$2,390.93 10x
+    #   PUMP  +1051082 @ 0.004756 -$1,220.96 10x
+    #   account leverage 10.2x, gross $50,673 on $4,971 equity.
+    # Equity HALVED in one day and unrealized swung ~$11.3k negative. Read
+    # twice 3s apart, identical -- not an API blip.
+    # The 30d backtest still scores it +$54.48 / sharpe +0.33 / 64% hit ONLY
+    # because closedPnl booked the ZEC win; this is the exact blind spot Step-2
+    # exists to catch (cf. 0xe2823659, 2026-08-14).
+    # Not selected live this cycle ("Selected 2/50"), so this is pre-emptive:
+    # without it the leader re-enters at 1.10 whenever discovery rotates it
+    # back. Keeping the explicit entry is the brake -- deleting the line falls
+    # back to auto-Sharpe and BUMPS it. 0.60 * $30 = $18.00, clear of
+    # min_per_trade_usd $10, so this brakes without silently muting.
+    "0xa3f996f2ec2b1fe240a57543bbfdb4d9d5804d04": 0.60
     # 2026-09-08 AUTO-DISCOVERED leader, NOT pinned. Explicit weight override to
     # cut its auto-Sharpe weight 1.16 -> 0.70 (-0.46, within the +/-0.5/run bound).
     # Same blind spot as 0x9636dc55/0xa3f996f2: it has been trading LIVE at 1.16
