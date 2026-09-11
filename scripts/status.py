@@ -58,7 +58,13 @@ def tier1_check() -> tuple[int, list[str]]:
 
     # INV 7: `active` is not proof we trade. A start that aborted after opening
     # the websocket once kept its PID and reported healthy to everything.
-    following = sh("grep -h 'Following .* leaders' state/main.log state/main.log.1 2>/dev/null | tail -1")
+    # Must cover EVERY rotation state: live, rotated, and gzipped. This has now
+    # broken twice -- once when logrotate truncated main.log (2026-09-11 19:17)
+    # and again an hour later when the rotated copy was compressed to .gz. Both
+    # times a healthy engine reported "NONE SEEN", and the tier-1 check uses this
+    # same lookup, so it would have false-escalated every 15 minutes.
+    following = sh("{ grep -h 'Following .* leaders' state/main.log state/main.log.1 2>/dev/null; "
+                   "zgrep -h 'Following .* leaders' state/main.log.*.gz 2>/dev/null; } | tail -1")
     if not following:
         reasons.append("no 'Following N leaders' in logs")
 
@@ -107,7 +113,13 @@ def main() -> int:
     # read went blank, printing "NONE SEEN" for a perfectly healthy engine.
     # Reporting unknown as broken is the mirror of INV 7's "healthy because we
     # cannot see", and just as wrong.
-    following = sh("grep -h 'Following .* leaders' state/main.log state/main.log.1 2>/dev/null | tail -1")
+    # Must cover EVERY rotation state: live, rotated, and gzipped. This has now
+    # broken twice -- once when logrotate truncated main.log (2026-09-11 19:17)
+    # and again an hour later when the rotated copy was compressed to .gz. Both
+    # times a healthy engine reported "NONE SEEN", and the tier-1 check uses this
+    # same lookup, so it would have false-escalated every 15 minutes.
+    following = sh("{ grep -h 'Following .* leaders' state/main.log state/main.log.1 2>/dev/null; "
+                   "zgrep -h 'Following .* leaders' state/main.log.*.gz 2>/dev/null; } | tail -1")
     following = following.split("]")[-1].strip() if following else "NONE SEEN"
     flag = "  <<< DOUBLE-RUN" if n not in ("1", "?") else ""
     print(f"ENGINE {active} procs={n}{flag} | {following}")
