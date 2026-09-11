@@ -14,7 +14,11 @@ is wrong even when the tests are green.
 
 ---
 
-## READY — P0 (TOP): we mirror a leader's EXITS as new ENTRIES
+## DONE 2026-08-15 — we mirrored a leader's EXITS as new ENTRIES
+
+> Merged as `classify_leader_fill` in `src/mirror.py`. Left marked READY by mistake,
+> which made the executor re-implement it ~25 times (4 duplicate branches) and never
+> reach the item below. Process bug, not an agent bug.
 
 **Problem.** `_build_intent` copies the leader's fill *side* and never asks
 whether that fill OPENED or CLOSED their position. When a leader buys to cover
@@ -65,7 +69,7 @@ item and needs a scale definition first. Keep this surgical.
 
 ---
 
-## READY — P0: maker shadow harness — prove the edge BEFORE it touches money
+## READY — P0 (TOP, START HERE): maker shadow harness — prove the edge BEFORE it touches money
 
 The maker on `wip/maker-hip4` has never run live. Before it does, it must be
 measured — and **a naive market-maker backtest is worse than no backtest**,
@@ -153,7 +157,7 @@ log before it goes live.
 
 ---
 
-## READY — P0c: the solvency gate reads base-dex equity only (INV 1, 4th time)
+## DONE 2026-08-15 — P0c: solvency gate read base-dex equity only (INV 1)
 
 **Problem.** `src/leaders._perp_equity_usd` calls `info.user_state()`, which
 returns BASE-dex equity only. A leader whose collateral sits on a HIP-3 dex
@@ -236,7 +240,7 @@ auto-rejected for being under 50.
 
 ---
 
-## READY — P3: measure realized base vs xyz on a clean post-fix window
+## DONE 2026-08-17 — P3: realized PnL by surface (`scripts/realized_pnl.py`)
 
 **Problem.** Judgements have been made on *unrealized* PnL (INV 10). Realized
 over the full history: base **+$96.73 net**, xyz **−$89.54 net**, outcomes
