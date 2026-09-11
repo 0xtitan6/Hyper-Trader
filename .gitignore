@@ -25,3 +25,7 @@ _*.py
 research/*.jsonl
 research/*.json
 research/*.csv
+
+# Rotated + compressed logs (logrotate owns these)
+state/*.gz
+state/*.1
