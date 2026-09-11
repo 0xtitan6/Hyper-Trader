@@ -12,6 +12,21 @@ a fix that passes tests and loses money.
 **Read `INVARIANTS.md` before any change.** A change that violates an invariant
 is wrong even when the tests are green.
 
+## Rules for this file (added 2026-09-11, after it went wrong)
+
+1. **A DONE item MUST carry the merge SHA that closed it.** Prose is not proof.
+   Items marked DONE without one are treated as unverified.
+2. **The executor runs an idempotency gate before implementing.** If the
+   acceptance criteria already pass on `main`, it stops and reports
+   `ALREADY DONE` instead of building. That check exists because three finished
+   items were left marked READY, so the executor rebuilt the topmost one ~25
+   times across 6 duplicate branches over a month while the item below it never
+   started. Every run looked successful, so nothing alerted.
+3. **The PM marks DONE at merge time, not later.** Merging without updating this
+   file is what caused (2).
+4. Before any deploy: `./scripts/preflight_deploy.sh` — asserts main, in sync,
+   clean tree, exactly one engine.
+
 ---
 
 ## DONE 2026-08-15 — we mirrored a leader's EXITS as new ENTRIES

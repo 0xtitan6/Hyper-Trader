@@ -1,0 +1,50 @@
+
+========= 0xd9ee2b58b061d62d8090f4cba11b5c2043b0cd0c =========
+  top-pick #1 (95% / 50 outcomes)
+  outcome fills (30d): 1856  distinct coins: 50
+  cadence:   median inter-fill =      0.0s   p95 =    797.0s
+  notional:  median $         43   max $       24,419
+  per-coin:  median fills/coin = 15.5   median holding = 93.9h   median open notional $ 51
+  settled:   679 fills with closedPnl != 0  (0 at px=0 → likely settlement dust)
+             wins 646 (median $20)  losses 33 (median $-10)
+  PROFILE: leaning MM  (mm_score 2/3)
+
+========= 0x413a302874db24bff6a0b085f3a65d840c41615b =========
+  top-pick #2 (92% / 18 outcomes)
+  outcome fills (30d): 306  distinct coins: 18
+  cadence:   median inter-fill =      0.0s   p95 =    987.3s
+  notional:  median $         45   max $       19,221
+  per-coin:  median fills/coin = 6.5   median holding = 0.1h   median open notional $ 22
+  settled:   118 fills with closedPnl != 0  (0 at px=0 → likely settlement dust)
+             wins 109 (median $10)  losses 9 (median $-0)
+  PROFILE: almost certainly MM  (mm_score 3/3)
+
+========= 0x7602860bc0c4124580cd42a0d1bb27336fc6386a =========
+  top-pick #3 (90% / 50 outcomes)
+  outcome fills (30d): 1955  distinct coins: 50
+  cadence:   median inter-fill =      0.0s   p95 =    908.5s
+  notional:  median $          6   max $        5,783
+  per-coin:  median fills/coin = 30.0   median holding = 95.0h   median open notional $ 21
+  settled:   443 fills with closedPnl != 0  (0 at px=0 → likely settlement dust)
+             wins 398 (median $12)  losses 45 (median $-2)
+  PROFILE: leaning MM  (mm_score 2/3)
+
+========= 0x7a4f914c2edd8bd6941ba51058289dc396b385c4 =========
+  SUSPECT (100% / 22 outcomes — MM?)
+  outcome fills (30d): 627  distinct coins: 22
+  cadence:   median inter-fill =      0.2s   p95 =  30845.1s
+  notional:  median $        144   max $       46,864
+  per-coin:  median fills/coin = 22.0   median holding = 10.8h   median open notional $ 153
+  settled:   31 fills with closedPnl != 0  (0 at px=0 → likely settlement dust)
+             wins 31 (median $631)  losses 0 (median $0)
+  PROFILE: leaning MM  (mm_score 2/3)
+
+========= 0xb31533962e88b707355777244d94ba5e1e6a7893 =========
+  SUSPECT (99% / 26 outcomes)
+  outcome fills (30d): 1567  distinct coins: 26
+  cadence:   median inter-fill =      0.0s   p95 =     11.8s
+  notional:  median $         51   max $       20,808
+  per-coin:  median fills/coin = 37.0   median holding = 6.2h   median open notional $ 92
+  settled:   351 fills with closedPnl != 0  (2 at px=0 → likely settlement dust)
+             wins 348 (median $5)  losses 3 (median $-1999)
+  PROFILE: leaning MM  (mm_score 2/3)
