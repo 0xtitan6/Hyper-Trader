@@ -29,3 +29,6 @@ research/*.csv
 # Rotated + compressed logs (logrotate owns these)
 state/*.gz
 state/*.1
+
+# Edge-hunt raw data dumps (l2 snapshots, ws tapes, candle caches) — regenerable
+research/edge-hunt-*/data/

@@ -189,3 +189,40 @@ def test_watchdog_watches_the_real_log() -> None:
     )
     assert '"state" / "main.log"' in code_only
     assert "run.log" not in code_only
+
+
+# --- 4. Outcome rewards: builder code must be on every quote ----------------
+
+
+def test_maker_attaches_builder_code_when_configured() -> None:
+    """No builder code => no rewards, and the reward IS the edge here.
+
+    outcome.xyz scores LP rewards only for orders carrying their builder code.
+    Quoting a binary without it is unpaid adverse selection: we'd eat the
+    inventory risk and collect none of the 40/50/10 quote/maker/taker pools.
+    """
+    from src.maker import MakerConfig, OutcomeMaker
+
+    cfg = MakerConfig(
+        coin="#20",
+        expiry_ts=2_000_000_000,
+        builder_address="0xAB5DBC057628BC18523C4CDFC0E1E2EBDBECB704",
+    )
+    m = OutcomeMaker.__new__(OutcomeMaker)
+    m.cfg = cfg
+    b = m._builder()
+
+    assert b is not None
+    assert b["b"] == "0xab5dbc057628bc18523c4cdfc0e1e2ebdbecb704"  # lowercased
+    assert b["f"] == 0  # program requires no builder fee
+
+
+def test_maker_builder_is_none_when_unconfigured() -> None:
+    """Unset => None, so the SDK omits the field entirely rather than sending
+    a malformed builder object that would reject every order."""
+    from src.maker import MakerConfig, OutcomeMaker
+
+    m = OutcomeMaker.__new__(OutcomeMaker)
+    m.cfg = MakerConfig(coin="#20", expiry_ts=2_000_000_000)
+
+    assert m._builder() is None
