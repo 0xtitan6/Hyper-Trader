@@ -18,6 +18,7 @@ the heavy lifting on entries and intra-position adjustments.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Any
 from urllib.error import URLError
@@ -69,6 +70,7 @@ class LeaderReconciler:
         slippage_bps: float = 50.0,
         manual_holdings: list[str] | None = None,
         dropped_confirm_passes: int = 2,
+        kill_switch_file: str = "./KILL",
     ):
         self.info = info
         self.state = state
@@ -79,6 +81,7 @@ class LeaderReconciler:
         self.auto_close = auto_close
         self.debounce_cycles = debounce_cycles
         self.slippage_bps = slippage_bps
+        self.kill_switch_file = kill_switch_file
         # Operator-managed positions to skip entirely. Stored lowercase for
         # case-insensitive match.
         self.manual_holdings: set[str] = {c.lower() for c in (manual_holdings or [])}
@@ -435,6 +438,24 @@ class LeaderReconciler:
     def _submit_close(self, coin: str, sz: float, avg_px: float, reason: str) -> None:
         """Submit reduce_only IOC to flatten `coin`. is_buy is the opposite of
         our current direction. Limit price = mid ± slippage_bps, rounded."""
+        # 2026-09-19: KILL is enforced in `mirror._risk_check`, which gates the
+        # MIRRORING path only. This is a second, independent order path — it
+        # calls exchange.order() directly — so before this line the kill switch
+        # did nothing here. An operator who touched ./KILL believing they had
+        # stopped all trading still had a live path that could flatten positions,
+        # which is the worst possible time to be wrong about that. A kill switch
+        # that covers some order paths is not a kill switch.
+        if os.path.exists(self.kill_switch_file):
+            self.alerter.alert(
+                "warn",
+                f"leader_reconcile: auto-close of {coin} SKIPPED — kill switch "
+                f"active ({self.kill_switch_file}); reason was {reason}",
+            )
+            log.warning(
+                "leader_reconcile: auto-close %s suppressed by kill switch", coin
+            )
+            return
+
         mid = self._fetch_mid(coin)
         if mid is None or mid <= 0:
             self.alerter.alert(

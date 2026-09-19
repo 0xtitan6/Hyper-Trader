@@ -41,6 +41,9 @@ def sh(cmd: str, timeout: int = 30) -> str:
 # Idea taken from Ruflo's "Agent Booster / Tier 1" framing (deterministic path,
 # $0, escalate only on need). The tiering vocabulary is theirs; the specific
 # conditions below are ours, drawn from INVARIANTS.md.
+LOG_STALE_S = 900   # 3x the observed 303s worst-case gap between writes
+
+
 def tier1_check() -> tuple[int, list[str]]:
     """Return (exit_code, reasons). 0 = healthy, no agent needed."""
     reasons: list[str] = []
@@ -67,6 +70,30 @@ def tier1_check() -> tuple[int, list[str]]:
                    "zgrep -h 'Following .* leaders' state/main.log.*.gz 2>/dev/null; } | tail -1")
     if not following:
         reasons.append("no 'Following N leaders' in logs")
+
+    # INV 7, part 2 (2026-09-19). The grep above matches a STARTUP line, which
+    # persists in the log forever — it proves the engine once began following,
+    # not that it is still working. A process that goes blind with its log file
+    # intact passes that check indefinitely. So bound it by recency: the engine
+    # writes continuously (observed max gap 303s on a live engine), and the
+    # reconcile loop alone touches the log every ~5 min. 900s is 3x the observed
+    # worst case — wide enough not to false-escalate, tight enough to catch a
+    # hung or unlinked engine within one tier-1 cycle.
+    #
+    # Rotation-safe: take the NEWEST mtime across main.log and main.log.1, since
+    # logrotate briefly leaves the fresh writes in the rotated copy.
+    newest: float | None = None
+    for name in ("main.log", "main.log.1"):
+        try:
+            newest = max(newest or 0.0, (ROOT / "state" / name).stat().st_mtime)
+        except OSError:
+            continue
+    if newest is None:
+        reasons.append("main.log missing entirely")
+    else:
+        age = time.time() - newest
+        if age > LOG_STALE_S:
+            reasons.append(f"main.log stale: no write for {age/60:.0f} min")
 
     free = sh("df --output=avail -k / | tail -1")
     try:

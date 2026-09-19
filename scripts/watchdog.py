@@ -34,7 +34,7 @@ from pathlib import Path
 log = logging.getLogger("watchdog")
 
 # Detection thresholds (seconds).
-LOG_STALE_THRESHOLD_S = 600       # run.log untouched 10 min → ERROR
+LOG_STALE_THRESHOLD_S = 600       # main.log untouched 10 min → ERROR
 JOURNAL_STALE_THRESHOLD_S = 1800  # journal.jsonl untouched 30 min → ERROR (reconciles every 5min so this is generous)
 RECONCILE_LAG_THRESHOLD_S = 900   # last reconcile event > 15 min ago → WARN
 COOLDOWN_S = 300                  # min seconds between repeat alerts of same kind
@@ -190,7 +190,13 @@ def check_once(cfg: WatchdogConfig, state: WatchdogState) -> None:
     """One pass of all checks. Mutates `state` for transition tracking."""
     kill_file = cfg.bot_dir / "KILL"
     kill_active = kill_file.exists()
-    run_log = cfg.bot_dir / "state" / "run.log"
+    # 2026-09-19: was "run.log", a path that has NEVER existed on this box. The
+    # freshness check below — the one check that detects "process alive but not
+    # working" — therefore took the else-branch on its first cycle, fired one
+    # `log_missing` ERROR, latched log_fresh=False, and stayed silent for a
+    # month. It was dead code straight through the 2026-09-16 zombie (engine
+    # alive 2.5 days with its whole directory deleted). The real log is main.log.
+    run_log = cfg.bot_dir / "state" / "main.log"
     journal = cfg.bot_dir / "state" / "journal.jsonl"
     now = time.time()
 
@@ -215,7 +221,7 @@ def check_once(cfg: WatchdogConfig, state: WatchdogState) -> None:
         log.info("bot down (kill_active=%s); skipping freshness checks", kill_active)
         return
 
-    # 2. run.log freshness
+    # 2. main.log freshness
     if run_log.exists():
         log_age = now - run_log.stat().st_mtime
         log_fresh = log_age < LOG_STALE_THRESHOLD_S
@@ -223,14 +229,14 @@ def check_once(cfg: WatchdogConfig, state: WatchdogState) -> None:
             maybe_alert(
                 cfg, state, "log_stale",
                 "ERROR",
-                f"run.log untouched for {log_age/60:.0f} min (threshold {LOG_STALE_THRESHOLD_S/60:.0f} min) — bot may be hung"
+                f"main.log untouched for {log_age/60:.0f} min (threshold {LOG_STALE_THRESHOLD_S/60:.0f} min) — bot may be hung"
             )
         elif log_fresh and not state.log_fresh:
-            maybe_alert(cfg, state, "log_recovered", "INFO", "run.log writes resumed")
+            maybe_alert(cfg, state, "log_recovered", "INFO", "main.log writes resumed")
         state.log_fresh = log_fresh
     else:
         if state.log_fresh:
-            maybe_alert(cfg, state, "log_missing", "ERROR", f"run.log not found at {run_log}")
+            maybe_alert(cfg, state, "log_missing", "ERROR", f"main.log not found at {run_log}")
             state.log_fresh = False
 
     # 3. journal.jsonl freshness

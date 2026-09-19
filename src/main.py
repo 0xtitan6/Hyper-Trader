@@ -207,6 +207,7 @@ def main(argv: list[str] | None = None) -> int:
         debounce_cycles=cfg.risk.leader_exit_debounce_cycles,
         slippage_bps=cfg.sizing.ioc_slippage_bps,
         manual_holdings=cfg.risk.manual_holdings,
+        kill_switch_file=cfg.risk.kill_switch_file,
     )
 
     def check_dropped_leaders(when: str) -> None:
