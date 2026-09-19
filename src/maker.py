@@ -74,6 +74,16 @@ class MakerConfig:
     min_quote_px: float = 0.01
     max_quote_px: float = 0.99
     kill_switch_file: str = "./KILL"
+    # --- Outcome liquidity-rewards eligibility (2026-09-19) ---
+    # outcome.xyz pays LP rewards (40% quoting / 50% maker-fill / 10% taker-fill)
+    # but ONLY for orders carrying their builder code. An order without it earns
+    # nothing — and since the reward IS the edge here, a missing builder code
+    # silently turns this strategy into unpaid adverse selection.
+    # Requires a ONE-TIME approveBuilderFee signed by the MASTER wallet; an
+    # agent/API wallet cannot do it (HL attributes the action to the signer,
+    # which then fails with "Must deposit before performing actions").
+    builder_address: str | None = None
+    builder_fee_tenths_bp: int = 0  # program requires fee = 0
 
 
 @dataclass
@@ -376,6 +386,7 @@ class OutcomeMaker:
                 px,
                 order_type={"limit": {"tif": "Alo"}},  # post-only
                 reduce_only=False,
+                builder=self._builder(),
             )
         except Exception as e:
             self.journal.write(
@@ -403,6 +414,17 @@ class OutcomeMaker:
             px=px,
             oid=oid,
         )
+
+    def _builder(self) -> dict[str, Any] | None:
+        """BuilderInfo for Outcome's liquidity-rewards attribution, or None.
+
+        Shape the SDK expects: {"b": <address>, "f": <fee in tenths of a bp>}.
+        `f` is 0 because the rewards program explicitly requires no builder fee —
+        the code is attached purely to be scored, not to pay anyone.
+        """
+        if not self.cfg.builder_address:
+            return None
+        return {"b": self.cfg.builder_address.lower(), "f": self.cfg.builder_fee_tenths_bp}
 
     def _cancel_all(self, reason: str) -> None:
         """Cancel any open quotes."""
