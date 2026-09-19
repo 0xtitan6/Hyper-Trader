@@ -32,3 +32,6 @@ state/*.1
 
 # Edge-hunt raw data dumps (l2 snapshots, ws tapes, candle caches) — regenerable
 research/edge-hunt-*/data/
+
+# ad-hoc analysis scratch from the edge hunt
+research/edge-hunt-*/analyze*.py
