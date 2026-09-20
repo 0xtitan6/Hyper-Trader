@@ -451,3 +451,53 @@ def test_england_does_not_match_new_england_patriots() -> None:
 
     assert gs.lookup("England") is None
     assert gs.lookup("Tottenham") is None          # absent entirely
+
+
+def test_unresolvable_event_markets_are_refused(monkeypatch) -> None:
+    """The third guard hole found on 2026-09-20, and why the default flipped.
+
+    The guard used to return SAFE for anything it did not recognise. That waved
+    through eight in-progress NFL games (keyed `competition:` rather than
+    `participant:`) and live UFC 331 bouts (UFC appears in no scoreboard map) —
+    both showing fat paired "edge" that was pure settled-event adverse selection.
+    An unrecognised event market is not a non-event market.
+    """
+    from src import gamestate as gs_mod
+
+    gs = gs_mod.GameState(leagues=(), ttl_s=0.0)
+    gs._cache = {"x": gs_mod.MatchState("Final", None, False, "a", "b", "0 - 0")}
+    gs._fetched_at = gs_mod.time.time()
+
+    for desc in ("competition:UFC 331|contestType:game",
+                 "countedPlay:regulation time and any overtime",
+                 ""):
+        safe, reason = gs.is_safe_to_quote(desc)
+        assert safe is False, f"{desc!r} should be refused"
+        assert "cannot resolve" in reason
+
+    # A genuine non-event market is unaffected.
+    assert gs.is_safe_to_quote("perp:BTC|threshold:100000")[0] is True
+
+
+def test_kickoff_buffer_is_single_source_of_truth():
+    """The maker (via gamestate) and the minder must agree on when a pre-match
+    book stops being pre-match.
+
+    They diverged once — gamestate 1.0h, minder 3.0h. The maker would rest a
+    quote 2h before kickoff and the minder would cancel it on the next 5-minute
+    tick, burning post-only queue position every cycle and risking a one-sided
+    fill close to kickoff. That is the -$47 shape from 2026-09-19.
+    """
+    import importlib.util
+    from src.gamestate import KICKOFF_BUFFER_H
+
+    spec = importlib.util.spec_from_file_location(
+        "pair_minder", Path(__file__).resolve().parent.parent / "scripts" / "pair_minder.py")
+    minder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(minder)
+
+    assert minder.KICKOFF_BUFFER_H is KICKOFF_BUFFER_H, (
+        "pair_minder must IMPORT KICKOFF_BUFFER_H from src.gamestate, not "
+        "redefine it — a redefinition lets the two drift apart silently")
+    assert KICKOFF_BUFFER_H >= 3.0, (
+        "buffer below 3h reopens the window where a quote survives into kickoff")

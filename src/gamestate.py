@@ -78,7 +78,29 @@ COMPETITION_LEAGUES = {
     "NHL": "hockey/nhl", "NCAAF": "football/college-football",
 }
 
+# Tokens that mark a description as EVENT-SHAPED. If one of these is present and
+# we cannot resolve the event to a scoreboard, we refuse — we do not shrug.
+#
+# This default was inverted on 2026-09-20 after the third hole in one day. The
+# guard used to return "not a sports market" -> SAFE for anything it did not
+# recognise, which waved through: eight in-progress NFL games (keyed
+# `competition:` not `participant:`), and live UFC 331 bouts (UFC is in no
+# scoreboard map). Both had juicy paired "edge" that was pure settled-event
+# adverse selection. An unrecognised event market is not a non-event market.
+EVENT_TOKENS = ("competition:", "contesttype:", "countedplay:", "participant:",
+                "tournament", "contest", "ufc", "boxing", "fight", "match")
+
 CACHE_TTL_S = 60.0
+# Stop quoting this long before kickoff: a resting order becomes an in-play
+# order the moment the contest starts, silently.
+#
+# SINGLE SOURCE OF TRUTH. scripts/pair_minder.py imports this value rather than
+# defining its own. They diverged once (maker 1.0h, minder 3.0h) and the gap is
+# not cosmetic: the maker would rest a quote 2h before kickoff and the minder
+# would cancel it minutes later, burning post-only queue position on every
+# cycle and — worse — risking a one-sided fill close to kickoff, which is
+# exactly the shape that cost -$47 on 2026-09-19. Any change here moves both.
+KICKOFF_BUFFER_H = 3.0
 
 
 @dataclass
@@ -247,18 +269,54 @@ class GameState:
                 return v
         return None
 
+    @staticmethod
+    def scheduled_start(description: str) -> datetime | None:
+        """Kickoff time parsed from the market's OWN description.
+
+        HIP-4 sports markets carry `scheduledStart:YYYYMMDD-HHMM` in UTC, e.g.
+        `...|participantA:Miami Dolphins|scheduledStart:20260920-2025|...`.
+
+        This is strictly better than matching team names against a scoreboard:
+        it is deterministic, league-agnostic, needs no feed, and is immune to the
+        name-collision class of bug that had 'England' resolving to 'New England
+        Patriots' earlier today. Prefer it; fall back to the feed only when the
+        field is absent.
+        """
+        if "scheduledStart:" not in description:
+            return None
+        raw = description.split("scheduledStart:")[1].split("|")[0].strip()
+        try:
+            return datetime.strptime(raw, "%Y%m%d-%H%M").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+
     def is_safe_to_quote(self, description: str) -> tuple[bool, str]:
         """Decide from a HIP-4 outcome description, e.g. 'participant:Fulham'.
 
         Returns (safe, reason). Non-sports markets are safe by default — this
         guard is about live events, not about every market.
         """
+        # PREFERRED PATH: the market states its own kickoff. No feed, no name
+        # matching, no ambiguity about which fixture is meant.
+        start = self.scheduled_start(description)
+        if start is not None:
+            now = datetime.now(tz=timezone.utc)
+            hrs = (start - now).total_seconds() / 3600
+            if hrs <= KICKOFF_BUFFER_H:
+                return False, (f"contest started/starts {start:%Y-%m-%d %H:%M}Z "
+                               f"({hrs:+.1f}h) — refusing to quote")
+            return True, f"contest starts {start:%Y-%m-%d %H:%M}Z (in {hrs:.1f}h)"
+
         is_participant = "participant:" in description
         comp = None
         if "competition:" in description:
             comp = description.split("competition:")[1].split("|")[0].strip().upper()
         if not is_participant and comp not in COMPETITION_LEAGUES:
-            return True, "not a sports market"
+            low = description.lower()
+            if any(t in low for t in EVENT_TOKENS) or not description.strip():
+                return False, ("event-shaped market we cannot resolve to a scoreboard "
+                               f"({description[:40]!r}) — refusing to quote")
+            return True, "not an event market"
 
         if not self.refresh():
             return False, "score feed unreachable — refusing to quote (fail safe)"

@@ -173,6 +173,11 @@ def main() -> int:
     for t in (info, ex.info):
         register_outcome_assets(t)
 
+    sp = post({"type": "spotClearinghouseState", "user": MASTER}) or {}
+    usdc = next((b for b in sp.get("balances", []) if b["coin"] == "USDC"), None)
+    free_usdc = [float(usdc["total"]) - float(usdc["hold"]) if usdc else 0.0]
+    print(f"free USDC: ${free_usdc[0]:.2f}")
+
     placed = []
     for s in surfaces[:args.max_pairs]:
         # Re-read the book at SUBMIT time. Measured 2026-09-20: all 8 orders
@@ -199,6 +204,17 @@ def main() -> int:
             log.info("skip oid=%s — edge decayed %.2f%% -> %.2f%%",
                      s["oid"], s["edge"] * 100, edge_now * 100)
             continue
+
+        # Reserve capital for BOTH legs before placing EITHER. Running out
+        # mid-surface leaves a lone resting bid, which is a directional bet we
+        # did not choose — the exact shape that cost $47 on 2026-09-19. Better to
+        # skip a surface entirely than to half-enter it.
+        need = args.usd_per_leg * 2
+        if free_usdc[0] < need:
+            log.info("skip oid=%s — $%.2f free, need $%.2f for both legs",
+                     s["oid"], free_usdc[0], need)
+            continue
+        free_usdc[0] -= need
 
         for side in (0, 1):
             coin = f"#{10 * s['oid'] + side}"
