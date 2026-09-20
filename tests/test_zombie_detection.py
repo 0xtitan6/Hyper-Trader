@@ -501,3 +501,39 @@ def test_kickoff_buffer_is_single_source_of_truth():
         "redefine it — a redefinition lets the two drift apart silently")
     assert KICKOFF_BUFFER_H >= 3.0, (
         "buffer below 3h reopens the window where a quote survives into kickoff")
+
+
+def test_pair_maker_requires_flow_not_just_depth():
+    """Depth is not flow. A book can show deep resting size and never trade.
+
+    Measured 2026-09-20: Kosovo, Greece, Serbia and Ireland each showed
+    $330-358 of depth at a clean 1.15% spread with $0 volume and 0 fills over
+    both 24h and 7d. That depth is one market maker posting 1000 shares a side
+    at a fixed 1.15c on every market from creation — not demand. A bid resting
+    there earns nothing for as long as it sits.
+
+    Ranking on depth alone picked those books three separate times (empty books
+    09-19, frozen index binaries 09-20, these 09-20), so the filter is a
+    permanent part of the scan, not a tuning knob.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "run_pair_maker.py").read_text()
+    assert "def traded_24h" in src, "scan must measure realised flow per surface"
+    assert "min_vol" in src and "min_trades" in src, \
+        "scan must reject surfaces below a flow floor"
+    # the flow gate must be applied inside scan(), not merely defined
+    scan_body = src.split("def scan(")[1].split("\ndef ")[0]
+    assert "traded_24h" in scan_body, "traded_24h must be CALLED by scan()"
+    assert "no flow" in scan_body, "scan must skip and log flowless surfaces"
+
+
+def test_pair_maker_rejects_incoherent_wide_books():
+    """A huge paired 'edge' means the bids are far below mid, not that the
+    market is mispriced. Measured: bids that deep leave us one-sided 91-95% of
+    the time, EV -0.87%/cycle. On 2026-09-20 the scan rested bids summing to
+    0.449 on a book whose mids summed to ~1.00 and called it a 55% edge.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "run_pair_maker.py").read_text()
+    scan_body = src.split("def scan(")[1].split("\ndef ")[0]
+    assert "mid_sum" in scan_body, "scan must sanity-check bids against mids"

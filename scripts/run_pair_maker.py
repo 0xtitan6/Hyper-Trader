@@ -80,9 +80,38 @@ def post(body: dict, tries: int = 8):
     return None
 
 
-def scan(gs: GameState, min_edge: float, min_depth: float) -> list[dict]:
-    """Surfaces worth quoting: two-sided, not in play, and the pair is buyable
-    below par by at least `min_edge`."""
+def traded_24h(oid: int) -> tuple[float, int]:
+    """(USD volume, trade count) across both legs in the last 24h."""
+    now = int(time.time() * 1000)
+    vol = 0.0
+    n = 0
+    for side in (0, 1):
+        c = post({"type": "candleSnapshot",
+                  "req": {"coin": f"#{10 * oid + side}", "interval": "1h",
+                          "startTime": now - 24 * 3600 * 1000, "endTime": now}})
+        time.sleep(0.05)
+        if isinstance(c, list):
+            vol += sum(float(x["v"]) for x in c)
+            n += sum(int(x["n"]) for x in c)
+    return vol, n
+
+
+def scan(gs: GameState, min_edge: float, min_depth: float,
+         min_vol: float, min_trades: int) -> list[dict]:
+    """Surfaces worth quoting: two-sided, not in play, buyable below par by at
+    least `min_edge` — AND actually traded.
+
+    DEPTH IS NOT FLOW. Measured 2026-09-20: Kosovo, Greece, Serbia and Ireland
+    each showed $330-358 of resting depth at a clean 1.15% spread and had
+    NEVER TRADED — $0 volume, 0 fills, in 24h and in 7d. A bid resting in one
+    of those books earns nothing for as long as it sits there. That deep quote
+    is a single market maker posting 1000 shares a side at a fixed 1.15c on
+    every market from creation; it is not evidence that anyone wants to trade.
+
+    This is the same mistake three times now (empty books 09-19, frozen index
+    binaries 09-20, these 09-20). Ranking on depth finds books nobody uses.
+    Requiring flow is what makes a resting bid a trade rather than decoration.
+    """
     meta = post({"type": "outcomeMeta"}) or {}
     out = []
     for o in meta.get("outcomes", []):
@@ -120,7 +149,21 @@ def scan(gs: GameState, min_edge: float, min_depth: float) -> list[dict]:
         depth = min(legs[0]["depth"], legs[1]["depth"])
         if edge < min_edge or depth < min_depth:
             continue
+        # A wide pair is only capturable if BOTH bids fill. Bids far below mid
+        # essentially never both fill (measured: 91-95% end up one-sided), so a
+        # huge "edge" here is a wide illiquid book, not an opportunity.
+        mid_sum = ((legs[0]["bid"] + legs[0]["ask"]) / 2
+                   + (legs[1]["bid"] + legs[1]["ask"]) / 2)
+        if edge > 0.06 or abs(mid_sum - 1.0) > 0.06:
+            log.info("skip oid=%s — wide/incoherent book (edge %.1f%%, mids sum %.3f)",
+                     oid, edge * 100, mid_sum)
+            continue
+        vol, ntrades = traded_24h(oid)
+        if vol < min_vol or ntrades < min_trades:
+            log.info("skip oid=%s — no flow ($%.0f / %d trades in 24h)", oid, vol, ntrades)
+            continue
         out.append({"oid": oid, "desc": desc, "edge": edge, "depth": depth,
+                    "vol24": vol, "trades24": ntrades,
                     "legs": legs, "reason": reason})
     out.sort(key=lambda s: -s["edge"])
     return out
@@ -135,6 +178,10 @@ def main() -> int:
     ap.add_argument("--min-edge", type=float, default=0.004,
                     help="minimum 1-(bidYes+bidNo); safe books median ~0.0017")
     ap.add_argument("--min-depth", type=float, default=25.0)
+    ap.add_argument("--min-vol", type=float, default=500.0,
+                    help="minimum 24h traded USD across both legs; depth is NOT flow")
+    ap.add_argument("--min-trades", type=int, default=10,
+                    help="minimum 24h fill count across both legs")
     ap.add_argument("--execute", action="store_true", help="default is dry-run")
     args = ap.parse_args()
 
@@ -150,13 +197,14 @@ def main() -> int:
         print("score feed unreachable — refusing to quote (fail safe)")
         return 2
 
-    surfaces = scan(gs, args.min_edge, args.min_depth)
+    surfaces = scan(gs, args.min_edge, args.min_depth, args.min_vol, args.min_trades)
     print(f"tradeable surfaces (not in play, edge >= {args.min_edge*100:.2f}%, "
           f"depth >= ${args.min_depth:.0f}): {len(surfaces)}")
     for s in surfaces[:10]:
         y, n = s["legs"][0], s["legs"][1]
         print(f"  edge {s['edge']*100:5.2f}%  bids {y['bid']:.4f}+{n['bid']:.4f}"
-              f"={y['bid']+n['bid']:.4f}  depth ${s['depth']:6.0f}  {s['desc'][:44]}  [{s['reason'][:30]}]")
+              f"={y['bid']+n['bid']:.4f}  depth ${s['depth']:5.0f}  vol24 ${s['vol24']:7.0f}"
+              f"/{s['trades24']:>3}t  {s['desc'][:34]}")
     if not surfaces:
         print("nothing qualifies right now")
         return 2
