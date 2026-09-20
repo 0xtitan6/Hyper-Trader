@@ -226,3 +226,228 @@ def test_maker_builder_is_none_when_unconfigured() -> None:
     m.cfg = MakerConfig(coin="#20", expiry_ts=2_000_000_000)
 
     assert m._builder() is None
+
+
+# --- 5. auto-hedge: a one-sided fill must become a $1.00 basket -------------
+
+
+def _maker_for_hedge(hedge_ask: float, max_pair: float = 1.02):
+    """Maker wired to hedge #38830 with #38831 at a given opposing ask."""
+    from src.maker import MakerConfig, OutcomeMaker
+
+    m = OutcomeMaker.__new__(OutcomeMaker)
+    m.cfg = MakerConfig(
+        coin="#38830",
+        expiry_ts=2_000_000_000,
+        hedge_on_fill=True,
+        hedge_coin="#38831",
+        hedge_max_pair_cost=max_pair,
+        builder_address="0xab5dbc057628bc18523c4cdfc0e1e2ebdbecb704",
+    )
+    m.info = MagicMock()
+    m.info.l2_snapshot.return_value = {
+        "levels": [[{"px": "0.40", "sz": "100"}], [{"px": str(hedge_ask), "sz": "100"}]]
+    }
+    m.exchange = MagicMock()
+    m.exchange.order.return_value = {"status": "ok"}
+    m.market_meta = MagicMock()
+    m.market_meta.round_price.side_effect = lambda px, coin: round(px, 4)
+    m.journal = MagicMock()
+    m.alerter = MagicMock()
+    return m
+
+
+def test_hedge_fires_immediately_on_fill() -> None:
+    """The 2026-09-19 loss in one test.
+
+    Filled Tottenham YES at 0.5077; the match moved and it marked to ~0.15,
+    losing $47 on a $47 leg against ~$3 of rewards. A one-sided leg has no
+    spread income at all — a continuous touch fills you at fair value — so the
+    only real income is owning BOTH legs of a $1.00 basket. Hedging at the fill
+    would have made that loss ~$1.
+    """
+    m = _maker_for_hedge(hedge_ask=0.49)
+    m._hedge_one_sided(sz=93.0, px=0.5077)
+
+    m.exchange.order.assert_called_once()
+    args, kwargs = m.exchange.order.call_args
+    assert args[0] == "#38831"      # the complementary leg
+    assert args[1] is True          # buying it
+    assert args[2] == 93.0          # same size — a basket, not a guess
+    assert kwargs["order_type"] == {"limit": {"tif": "Ioc"}}   # taker: immediacy is the point
+    assert kwargs["builder"]["b"] == "0xab5dbc057628bc18523c4cdfc0e1e2ebdbecb704"
+
+
+def test_hedge_refuses_once_the_leg_has_repriced() -> None:
+    """Hedging late is EV-NEUTRAL, so it must not fire.
+
+    Holding a leg worth 0.15 and paying 0.85 to lock $1.00 are worth exactly the
+    same; crossing at that point only converts variance into a certain loss while
+    paying a spread for the privilege. All the value of hedging is immediacy.
+    """
+    m = _maker_for_hedge(hedge_ask=0.85)      # pair would cost 1.3577
+    m._hedge_one_sided(sz=93.0, px=0.5077)
+
+    m.exchange.order.assert_not_called()
+    assert m.alerter.alert.called
+
+
+def test_hedge_is_off_by_default() -> None:
+    """Taking liquidity is a money action; it stays opt-in."""
+    from src.maker import MakerConfig
+
+    assert MakerConfig(coin="#20", expiry_ts=2_000_000_000).hedge_on_fill is False
+
+
+# --- 6. in-play guard: never quote a match that is being played -------------
+
+
+def _gamestate_with(monkeypatch, events_by_league: dict):
+    """GameState wired to a fake ESPN feed."""
+    from src import gamestate as gs
+
+    class FakeResp:
+        def __init__(self, payload):
+            self._p = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self._p
+
+    def fake_get(url, timeout=15):
+        for lg, payload in events_by_league.items():
+            if lg in url:
+                return FakeResp(payload)
+        return FakeResp({"events": []})
+
+    monkeypatch.setattr(gs.requests, "get", fake_get)
+    monkeypatch.setattr(gs.time, "sleep", lambda *_: None)
+    return gs.GameState(leagues=("eng.1",), ttl_s=0.0)
+
+
+def _event(home, away, desc, clock="10'", hs="0", as_="0"):
+    return {"competitions": [{
+        "status": {"type": {"description": desc}, "displayClock": clock},
+        "competitors": [{"team": {"displayName": home}, "score": hs},
+                        {"team": {"displayName": away}, "score": as_}],
+    }]}
+
+
+def test_refuses_to_quote_a_live_match(monkeypatch) -> None:
+    """The $47 loss in one test.
+
+    Measured 2026-09-20: in-play surfaces show a 6.68% median paired-bid edge
+    versus 0.17% when not live — a 39x gap. That spread is not opportunity, it
+    is the price of someone watching the match knowing the score before the book.
+    """
+    gs = _gamestate_with(monkeypatch, {"eng.1": {"events": [
+        _event("Fulham", "Manchester United", "First Half", "10'")]}})
+
+    safe, reason = gs.is_safe_to_quote("participant:Fulham|competition:EPL")
+
+    assert safe is False
+    assert "IN PLAY" in reason
+
+
+def test_allows_quoting_before_and_after(monkeypatch) -> None:
+    """Pre-match and settled books are where the honest ~0.17% lives."""
+    gs = _gamestate_with(monkeypatch, {"eng.1": {"events": [
+        _event("Leeds United", "Crystal Palace", "Full Time", "90'+4'"),
+        _event("Arsenal", "Chelsea", "Scheduled", "0'")]}})
+
+    assert gs.is_safe_to_quote("participant:Leeds United")[0] is True
+    assert gs.is_safe_to_quote("participant:Arsenal")[0] is True
+
+
+def test_partial_name_match(monkeypatch) -> None:
+    """Feeds and market descriptions disagree on names. An exact-match lookup
+    would miss and then read as SAFE — the dangerous direction to fail."""
+    gs = _gamestate_with(monkeypatch, {"eng.1": {"events": [
+        _event("Tottenham Hotspur", "Aston Villa", "Second Half", "67'", "0", "1")]}})
+
+    safe, reason = gs.is_safe_to_quote("participant:Tottenham")
+    assert safe is False
+    assert "Aston Villa" in reason or "IN PLAY" in reason
+
+
+def test_feed_outage_refuses_rather_than_assumes_safe(monkeypatch) -> None:
+    """An outage is not evidence that no match is being played."""
+    from src import gamestate as gs_mod
+
+    def boom(*_a, **_k):
+        raise gs_mod.requests.RequestException("down")
+
+    monkeypatch.setattr(gs_mod.requests, "get", boom)
+    monkeypatch.setattr(gs_mod.time, "sleep", lambda *_: None)
+
+    safe, reason = gs_mod.GameState(leagues=("eng.1",), ttl_s=0.0).is_safe_to_quote("participant:Fulham")
+    assert safe is False
+    assert "fail safe" in reason
+
+
+def test_non_sports_markets_are_unaffected(monkeypatch) -> None:
+    """This guard is about live events, not about every market."""
+    gs = _gamestate_with(monkeypatch, {"eng.1": {"events": []}})
+    assert gs.is_safe_to_quote("perp:BTC|threshold:100000")[0] is True
+
+
+# --- 7. positive evidence, not a weakened default --------------------------
+
+
+def test_future_fixture_is_quotable_absence_alone_is_not(monkeypatch) -> None:
+    """The distinction that decides whether this strategy is safe.
+
+    ESPN's default scoreboard returns only the CURRENT matchday, so a fixture a
+    week out is absent — indistinguishable from "this feed does not cover it".
+    Treating absence as safe is how you end up quoting into a live match on the
+    day a feed has a gap. So the guard requires POSITIVE evidence: the team
+    appears in a future SCHEDULED fixture.
+    """
+    from src import gamestate as gs_mod
+
+    gs = gs_mod.GameState(leagues=("soccer/uefa.nations",), ttl_s=0.0)
+    gs._cache = {}                      # not on any current scoreboard
+    gs._fetched_at = gs_mod.time.time()
+    gs._upcoming = {"england": "2099-09-27"}
+    gs._upcoming_at = gs_mod.time.time()
+
+    safe, reason = gs.is_safe_to_quote("participant:England")
+    assert safe is True
+    assert "next plays" in reason
+
+    # A team with no future fixture found gets no benefit of the doubt.
+    safe2, reason2 = gs.is_safe_to_quote("participant:Narnia")
+    assert safe2 is False
+
+
+def test_fixture_today_is_refused(monkeypatch) -> None:
+    """A fixture dated today may already have kicked off — stay out."""
+    from datetime import datetime, timezone
+
+    from src import gamestate as gs_mod
+
+    gs = gs_mod.GameState(leagues=("soccer/uefa.nations",), ttl_s=0.0)
+    gs._cache = {}
+    gs._fetched_at = gs_mod.time.time()
+    gs._upcoming = {"spain": datetime.now(tz=timezone.utc).date().isoformat()}
+    gs._upcoming_at = gs_mod.time.time()
+
+    safe, reason = gs.is_safe_to_quote("participant:Spain")
+    assert safe is False
+    assert "TODAY" in reason
+
+
+def test_england_does_not_match_new_england_patriots() -> None:
+    """Naive substring matching reported England as IN PLAY at 7-0 on
+    2026-09-20 — it had matched an NFL game. Failing safe there was luck; the
+    same collision reversed would approve quoting into a live game."""
+    from src import gamestate as gs_mod
+
+    gs = gs_mod.GameState(leagues=(), ttl_s=0.0)
+    gs._cache = {"new england patriots": gs_mod.MatchState(
+        "In Progress", "8:22", True, "New England Patriots", "Pittsburgh Steelers", "7 - 0")}
+
+    assert gs.lookup("England") is None
+    assert gs.lookup("Tottenham") is None          # absent entirely
