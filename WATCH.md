@@ -6,7 +6,21 @@
 
 **Never go silent during an open position.** If the watcher monitor stops emitting heartbeats for >7 minutes during an active trade, assume it died and restart it. Operator should never have to ask "how is the trade looking?" — the answer should be in their pocket already.
 
-## Current run state — 2026-05-05 02:46 UTC
+> ## ⚠️ HISTORICAL — DO NOT ACT ON THIS
+>
+> Everything below was true on **2026-05-05** and is now fiction. The position
+> settled months ago, the task IDs do not exist, the balances are wrong, and the
+> copy engine described here as "disabled" has been running since. It sat
+> labelled "Current run state" for four months and any agent reading it would
+> have acted on a May snapshot.
+>
+> **For live state, never a doc:** `.venv/bin/python scripts/status.py`,
+> `systemctl list-timers --all | grep hip4`, `tail state/main.log`.
+>
+> Kept for the maker-experiment context only. See `START_HERE.md` to route, and
+> `MEASURED.md` for findings that are current.
+
+## Historical run state — 2026-05-05 02:46 UTC (STALE)
 
 ### Open position
 | Field | Value |
