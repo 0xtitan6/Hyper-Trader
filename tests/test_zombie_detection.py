@@ -653,3 +653,53 @@ def test_equity_snapshot_counts_hip3_dexes():
         assert f'"{dex}"' in src, f"{dex} dex collateral must be counted"
     assert "per_dex" in src and "perp += sum(per_dex.values())" in src, \
         "per-dex balances must be ADDED to equity, not merely reported"
+
+
+def _status_src():
+    return (Path(__file__).resolve().parent.parent
+            / "scripts" / "status.py").read_text()
+
+
+def test_disabled_engine_is_not_an_incident():
+    """A service a human disabled is not a service that crashed.
+
+    2026-09-21: the copy engine was stopped and disabled deliberately (t=+0.25
+    over 964 closes, and it held $175 of collateral wanted for market making).
+    Every engine check failed at once and tier-1 escalated "engine inactive;
+    engine not running; main.log stale" every 15 minutes to the person who had
+    chosen that state three hours earlier.
+
+    An alert that fires on an intended condition trains the operator to ignore
+    alerts, which is worse than not alerting. systemd already records intent:
+    `disabled` is a human decision, `enabled` + `inactive` is a death.
+    """
+    src = _status_src()
+    assert "is-enabled hyper-trader" in src, \
+        "must read systemd's enabled state to tell intent from failure"
+    assert "engine_off_on_purpose" in src, \
+        "must distinguish a deliberately-disabled engine from a crashed one"
+
+
+def test_engine_liveness_checks_are_gated_on_intent():
+    """Log-freshness and 'Following N leaders' are liveness probes for a RUNNING
+    engine. When it is off by choice they are guaranteed to fail and prove
+    nothing, so each must be gated rather than left to fire.
+    """
+    src = _status_src()
+    for probe in ("no 'Following N leaders' in logs", "main.log stale"):
+        i = src.index(probe)
+        window = src[max(0, i - 400):i + 200]
+        assert "engine_off_on_purpose" in window, \
+            f"probe {probe!r} must be gated on whether the engine is off on purpose"
+
+
+def test_real_engine_death_still_escalates():
+    """The gate must be narrow: only `disabled` suppresses. An enabled service
+    that is inactive has died and must still page.
+    """
+    src = _status_src()
+    i = src.index("engine_off_on_purpose = ")
+    line = src[i:src.index("\n", i)]
+    assert 'enabled == "disabled"' in line, \
+        "suppression must require systemd `disabled`, not merely `inactive`"
+    assert 'active != "active"' in line

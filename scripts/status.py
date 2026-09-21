@@ -49,12 +49,36 @@ def tier1_check() -> tuple[int, list[str]]:
     reasons: list[str] = []
 
     active = sh("systemctl is-active hyper-trader") or "unknown"
-    if active != "active":
-        reasons.append(f"engine {active}")
+    enabled = sh("systemctl is-enabled hyper-trader") or "unknown"
 
-    n = sh("ps -eo pid,cmd | grep '[s]rc.main' | wc -l")
-    if n != "1":
-        reasons.append(f"DOUBLE-RUN procs={n}" if n not in ("0", "") else "engine not running")
+    # DELIBERATELY OFF IS NOT BROKEN.
+    #
+    # 2026-09-21: the copy engine was stopped and disabled on purpose (measured
+    # t=+0.25 over 964 closes — no detectable edge — and it held $175 of
+    # collateral wanted for market making). Every engine check then failed at
+    # once and tier-1 escalated "engine inactive; engine not running; main.log
+    # stale" every 15 minutes, to a human who had chosen that state three hours
+    # earlier. An alert that fires on an intended condition trains the operator
+    # to ignore alerts, which is worse than not alerting at all.
+    #
+    # systemd already records intent: `disabled` means a human ran `systemctl
+    # disable`, `enabled` + `inactive` means it died. Only the second is an
+    # incident. The engine's liveness checks below (double-run, "Following N
+    # leaders", log freshness) are all meaningless when it is off by choice, so
+    # they are skipped rather than muted individually.
+    engine_off_on_purpose = (enabled == "disabled" and active != "active")
+
+    if engine_off_on_purpose:
+        # Reported by --status for visibility; never escalated.
+        reasons_info = f"engine disabled by operator (active={active})"
+    else:
+        reasons_info = ""
+        if active != "active":
+            reasons.append(f"engine {active}")
+
+        n = sh("ps -eo pid,cmd | grep '[s]rc.main' | wc -l")
+        if n != "1":
+            reasons.append(f"DOUBLE-RUN procs={n}" if n not in ("0", "") else "engine not running")
 
     if (ROOT / "KILL").exists():
         reasons.append("KILL file present")
@@ -68,7 +92,7 @@ def tier1_check() -> tuple[int, list[str]]:
     # same lookup, so it would have false-escalated every 15 minutes.
     following = sh("{ grep -h 'Following .* leaders' state/main.log state/main.log.1 2>/dev/null; "
                    "zgrep -h 'Following .* leaders' state/main.log.*.gz 2>/dev/null; } | tail -1")
-    if not following:
+    if not following and not engine_off_on_purpose:
         reasons.append("no 'Following N leaders' in logs")
 
     # INV 7, part 2 (2026-09-19). The grep above matches a STARTUP line, which
@@ -89,10 +113,13 @@ def tier1_check() -> tuple[int, list[str]]:
         except OSError:
             continue
     if newest is None:
-        reasons.append("main.log missing entirely")
+        if not engine_off_on_purpose:
+            reasons.append("main.log missing entirely")
     else:
         age = time.time() - newest
-        if age > LOG_STALE_S:
+        # A disabled engine writes nothing. Staleness proves it is off, which we
+        # already know, so it cannot be evidence of a fault.
+        if age > LOG_STALE_S and not engine_off_on_purpose:
             reasons.append(f"main.log stale: no write for {age/60:.0f} min")
 
     free = sh("df --output=avail -k / | tail -1")
