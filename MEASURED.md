@@ -139,6 +139,23 @@ quotes survive a complete scoring window. Read at 00:22Z.
 Builder code `0xab5dbc…b704` is attached and accepted; `maxBuilderFee` returns
 1000. No `approveBuilderFee` needed at fee 0.
 
+**No scoring endpoint exists** (probed 16 paths 2026-09-21). Monarch serves only
+`/marina/claims/rewards` and `/marina/claims/proofs`; every other route returns
+an AWS "Missing Authentication Token", i.e. no such route. There is no
+leaderboard, no per-address score, no threshold field — so there is nothing more
+to read, by API or by browsing the dashboard. Do not re-probe.
+
+The response does confirm the system PROCESSES us: `root_updated_at` advances
+each epoch and the claim route extends. It computes our entry and returns
+nothing, rather than erroring or ignoring the address.
+
+**Leading hypothesis after 3 zero epochs:** the pools are 40% quoting / 50%
+maker-fill / 10% taker-fill. We were quoting one tick BEHIND the touch with
+$384-$795 of queue ahead of us (see the queue-position bug), so we could earn
+presence but were structurally unable to take a single maker fill — **60% of the
+pool was unreachable by construction.** Fixed 2026-09-21; first epoch quoting at
+the front of the book is the real test.
+
 ### Measured dead ends — do not re-research
 - **YES+NO complement arb**: closed. Min sum 1.00001 across 213 outcomes.
 - **Favourite-longshot bias**: absent. Slope 1.034, p=0.74.
