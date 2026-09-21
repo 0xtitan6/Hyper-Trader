@@ -103,6 +103,29 @@ Soccer internationals are the opposite — pre-match, real flow, nothing
 happening yet: England $13.0k/314 trades, Croatia $13.1k/316, Spain $12.9k/322.
 Kosovo, Greece, Serbia, Ireland: **$0 / 0 trades** despite the deepest books.
 
+### What the 3h kickoff buffer costs (2026-09-21, n=19 NFL markets)
+Pre-kickoff hourly volume, summed across every NFL market that kicked off that day:
+
+| window | volume | share |
+|---|---|---|
+| T-24 .. T-4 | $287,288 | 75% |
+| **final 3h (T-3..T-0)** | **$96,098** | **25%** |
+| of which T-0 alone | $44,508 | 12% |
+
+**The buffer excludes the busiest window**, and the single heaviest hour is the
+one containing kickoff.
+
+Keep it anyway. That flow spikes because information is arriving — NFL inactives
+and injury reports land ~90 minutes before kickoff — so the late book is dense
+with people who know who is playing. It is the Tottenham trade with a press
+release instead of a goal. Quoting T-24..T-3 captures 75% of the window with
+none of that asymmetry.
+
+Caveat on the 75%: this is aggregated over all markets, and most late flow goes
+to the TIGHT books (the Rams moneyline did $44,616/1,192 trades at a 0.00%
+paired edge) rather than the wide ones we can actually profit from. 75% is the
+ceiling on the opportunity, not our share of it.
+
 ### LP rewards — attribution UNPROVEN (2026-09-18 .. 09-20)
 $200k/month pool, daily UTC epochs, merkle root ~00:15Z, claim-based, route
 expires ~7d (unclaimed rewards are lost). Two full epochs qualified on every
