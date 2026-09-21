@@ -124,6 +124,33 @@ Builder code `0xab5dbc…b704` is attached and accepted; `maxBuilderFee` returns
 - **Barrier/digital arb at realised vol**: breakeven 38.0% vs realised
   32.9–39.7%. Not executable.
 
+### In-play market making is not available to us (2026-09-21, live NFL, 8 min)
+Sampled two live Chiefs/Colts books against our ESPN score feed every 6s:
+
+| | count |
+|---|---|
+| price moved, **no** score change | **22** |
+| score changed, **no** price move | 2 |
+| both inside the same 6s window | **0** |
+
+At t=344s the Colts kicked a field goal — our feed went 0-7 → 3-7 and the mid
+moved **0.5963 → 0.5963**, not one tick. It did not react because it had
+already reacted: over the preceding four minutes the mid ran 0.5750 → 0.6512 →
+0.5850 → 0.5963 while our feed sat blind at "0-7, clock 8:25".
+
+The book prices the *drive* — field position, down, distance, possession. Our
+feed carries score and clock only. By the time we learn a score changed, it is
+fully priced.
+
+**We are not slightly behind; we are a different speed class.** Quoting in-play
+is writing free options to people who can see the game. This is what the 6.68%
+in-play vs 0.17% pre-match spread was always paying for.
+
+Professional in-play MMs buy the edge rather than compute it: rights-holder
+feeds (Sportradar, Genius) arrive 3-8s before broadcast, at five to six figures
+a year. Play-by-play from ESPN would narrow the gap to those 3-8s — which is
+the entire window the game is played in. Not viable.
+
 ---
 
 ## Crypto one-touch barriers (HIP-4 `template:priceTouch`)
