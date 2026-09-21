@@ -84,6 +84,23 @@ class MakerConfig:
     # which then fails with "Must deposit before performing actions").
     builder_address: str | None = None
     builder_fee_tenths_bp: int = 0  # program requires fee = 0
+    # --- Auto-hedge on one-sided fill (2026-09-19) ---
+    # A one-sided fill has NO spread income: a continuous touch fills you at fair
+    # value (optional stopping), and because legs are spot-like and held to
+    # settlement there is no round-trip to capture. Income exists ONLY when both
+    # legs of a YES+NO pair fill — you pay (1-2d) for a basket worth $1.00.
+    #
+    # Measured on this account 2026-09-19: filled Tottenham YES at 0.5077, price
+    # collapsed through us during the match, marked to ~0.15 = -$47 on a $47 leg,
+    # against ~$3 of rewards earned. Hedging AT THE FILL would have cost ~0.49 for
+    # a pair summing ~1.00 and turned -$47 into roughly -$1.
+    #
+    # Crucially this must happen at the moment of fill. Hedging later is EV-NEUTRAL
+    # (holding a leg worth 0.15 and paying 0.85 to lock $1.00 are identical); it
+    # only removes variance. All the value is in the immediacy.
+    hedge_on_fill: bool = False
+    hedge_coin: str | None = None          # complementary leg, e.g. "#38831" for "#38830"
+    hedge_max_pair_cost: float = 1.02      # abort if YES+NO would exceed this
 
 
 @dataclass
@@ -239,6 +256,62 @@ class OutcomeMaker:
             inventory_shares=self._inventory_shares,
             inventory_cost=self._inventory_cost,
         )
+        if side == "B" and self.cfg.hedge_on_fill:
+            self._hedge_one_sided(sz, px)
+
+    def _hedge_one_sided(self, sz: float, px: float) -> None:
+        """Cross for the complementary leg immediately, turning a directional
+        position into a $1.00 basket.
+
+        Deliberately a TAKER order: the whole point is immediacy. Resting a
+        passive hedge reintroduces the exposure we are trying to close, and the
+        thing that made the 2026-09-19 loss expensive was the delay, not the
+        spread paid.
+
+        Refuses if the pair would cost more than `hedge_max_pair_cost` — past
+        that the leg has already repriced and hedging just locks the loss in at
+        the worst price, which is EV-neutral versus simply holding.
+        """
+        hedge = self.cfg.hedge_coin
+        if not hedge:
+            return
+        try:
+            book = self.info.l2_snapshot(hedge)
+            levels = (book or {}).get("levels") or []
+            ask = float(levels[1][0]["px"])
+        except (AttributeError, IndexError, KeyError, TypeError, ValueError):
+            self.alerter.alert("error", f"hedge: no book for {hedge}; {self.cfg.coin} left one-sided")
+            return
+
+        pair_cost = px + ask
+        if pair_cost > self.cfg.hedge_max_pair_cost:
+            self.alerter.alert(
+                "warn",
+                f"hedge SKIPPED {self.cfg.coin}+{hedge}: pair would cost {pair_cost:.4f} "
+                f"> {self.cfg.hedge_max_pair_cost:.2f}. Leg has already repriced — hedging "
+                f"now only locks the loss, it does not recover it.",
+            )
+            self.journal.write("maker_hedge_skipped", coin=self.cfg.coin, hedge=hedge,
+                               pair_cost=pair_cost, fill_px=px, hedge_ask=ask)
+            return
+
+        limit = self.market_meta.round_price(ask * 1.01, hedge)
+        try:
+            result = self.exchange.order(
+                hedge, True, sz, limit,
+                order_type={"limit": {"tif": "Ioc"}},   # take it now
+                reduce_only=False,
+                builder=self._builder(),
+            )
+        except Exception as e:  # noqa: BLE001 — a failed hedge must not kill the maker
+            self.alerter.alert("error", f"hedge FAILED {hedge}: {type(e).__name__}: {e}")
+            self.journal.write("maker_hedge_failed", coin=self.cfg.coin, hedge=hedge, error=str(e))
+            return
+
+        log.info("hedged %s fill with %s sz=%s pair_cost=%.4f", self.cfg.coin, hedge, sz, pair_cost)
+        self.journal.write("maker_hedged", coin=self.cfg.coin, hedge=hedge, sz=sz,
+                           fill_px=px, hedge_px=limit, pair_cost=pair_cost,
+                           locked_pnl=1.0 - pair_cost, result=str(result)[:200])
 
     # ---------- internals ----------
 
