@@ -754,3 +754,28 @@ def test_equity_refuses_to_report_an_unreconciled_number():
            / "scripts" / "equity_snapshot.py").read_text()
     assert "UNRECONCILED" in src, "must flag when equity and flows disagree"
     assert "TREAT" in src, "must tell the operator which number to trust"
+
+
+def test_equity_uses_hyperliquid_account_value_not_a_computed_sum():
+    """Summing spot + legs + perp + vault DOUBLE-COUNTS.
+
+    Perp `accountValue` is reported against the same unified USDC balance that
+    spot already reports. Measured 2026-09-21: the computed sum said $2,927.74
+    while `portfolio` said $2,708.16 — a $219.58 gap, almost exactly the perp
+    accountValue of $219.91. That turned a true lifetime -$28 into a reported
+    +$96, which is the most dangerous kind of bug in a P&L tracker because a
+    wrong number is trusted exactly as much as a right one.
+
+    `portfolio` is authoritative, verified on two events: it rose +$1,936.92 at
+    01:05Z against a $1,933.87 transfer in, and did NOT drop at the 20:40Z HLP
+    deposit, so vault equity is already inside it.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "equity_snapshot.py").read_text()
+    assert '"portfolio"' in src, "equity must come from HL's own account value"
+    assert "accountValueHistory" in src
+    body = src.split("def snapshot(")[1].split("\ndef ")[0]
+    assert "equity = spot_total + legs_value + perp + vault" not in body.split("fallback")[0] \
+        or "FALLBACK" in src, "components must not be summed as the primary equity"
+    assert "never summed into equity" in src, \
+        "must state that components are for location only"

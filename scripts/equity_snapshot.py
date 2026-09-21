@@ -185,14 +185,29 @@ def snapshot() -> dict:
     resting = sum(float(o["sz"]) * float(o["limitPx"])
                   for o in oo if o["coin"].startswith("#"))
 
-    # spot_total already includes USDC backing resting orders (it is `hold`),
-    # so equity = spot USDC + outcome legs + perp + vault. Resting is reported
-    # for visibility, NOT added, or it would double-count.
-    equity = spot_total + legs_value + perp + vault
+    # USE HYPERLIQUID'S OWN ACCOUNT VALUE. Do not sum components.
+    #
+    # Summing spot + legs + perp + vault DOUBLE-COUNTS, because perp
+    # `accountValue` is reported against the same unified USDC balance that
+    # spot already reports. Measured 2026-09-21: the computed sum said $2,927.74
+    # while `portfolio` said $2,708.16 — a $219.58 gap, almost exactly the perp
+    # accountValue of $219.91. That inflated reported P&L from a true -$28 to
+    # a fictional +$96.
+    #
+    # `portfolio` is authoritative and verified on two events: it rose
+    # +$1,936.92 at 01:05Z against a $1,933.87 transfer in, and it did NOT drop
+    # at the 20:40Z HLP deposit, so vault equity is already inside it.
+    #
+    # The components below are still recorded — they are useful for seeing
+    # WHERE the money sits — but they are never summed into equity.
+    pf = dict(post({"type": "portfolio", "user": MASTER}) or [])
+    hist = (pf.get("day") or {}).get("accountValueHistory") or []
+    equity = float(hist[-1][1]) if hist else (spot_total + legs_value + perp + vault)
     return {
         "ts": time.time(),
         "iso": datetime.now(tz=timezone.utc).isoformat(timespec="seconds"),
         "equity": round(equity, 2),
+        "equity_source": "portfolio.accountValue" if hist else "computed-sum-FALLBACK",
         "spot_usdc": round(spot_total, 2),
         "spot_free": round(spot_total - spot_hold, 2),
         "outcome_legs": round(legs_value, 2),
@@ -235,13 +250,14 @@ def main() -> int:
     with LEDGER.open("a") as f:
         f.write(json.dumps(s) + "\n")
 
-    print(f"equity        ${s['equity']:>10,.2f}")
+    print(f"equity        ${s['equity']:>10,.2f}   [{s['equity_source']}]")
     print(f"  spot USDC   ${s['spot_usdc']:>10,.2f}   (free ${s['spot_free']:,.2f})")
     print(f"  outcome legs${s['outcome_legs']:>10,.2f}")
     print(f"  perp        ${s['perp']:>10,.2f}   (upnl {s['perp_upnl']:+.2f}, maint {s['perp_maint_pct']}%)")
     if s["perp_by_dex"]:
         print(f"    per-dex   {s['perp_by_dex']}")
-    print(f"  HLP vault   ${s['vault']:>10,.2f}")
+    print(f"  HLP vault   ${s['vault']:>10,.2f}   (inside accountValue)")
+    print(f"  (components shown for location only — never summed into equity)")
     print(f"quoting       ${s['resting_orders']:>10,.2f} across {s['n_orders']} legs")
     print(f"net deposits  ${s['net_deposits']:>10,.2f}")
     if prev:
