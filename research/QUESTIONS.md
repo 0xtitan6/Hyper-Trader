@@ -46,6 +46,40 @@ results land), and make the guard distinguish the template rather than guessing
 from a team name. This is the FOURTH distinct guard hole — after competition-
 keyed NFL, the England/New-England collision, and unresolvable UFC.
 
+### 5. Why does equity not reconcile against fills? ($75 unexplained)
+
+`scripts/equity_snapshot.py` computes equity as
+`spot USDC + outcome legs + perp(all dexes) + HLP`. Measured 2026-09-21 over a
+14.6h window from a 02:14:32Z baseline:
+
+```
+equity change              +$93.79
+realised (userFillsByTime)  +$10.98
+fees                         -$0.12
+unrealised (all dexes)       +$7.87
+                            --------
+explained                   +$18.72
+UNEXPLAINED                 +$75.07
+```
+
+No matching ledger transfer (`userNonFundingLedgerUpdates` shows only $0.19 of
+tiny sends), funding is -$0.52, and the fills endpoint is time-bounded so it is
+not truncation.
+
+Component deltas: spot -$280, legs +$285, perp +$87, vault 0. The legs/spot pair
+offsets (we bought legs), so the anomaly is **perp +$87 against +$18 of
+justified PnL** — base went $0 -> ~$32 and xyz $108 -> $169 when the copy engine
+restarted and opened positions.
+
+Leading hypothesis: perp/dex `accountValue` is reported against the SAME unified
+spot USDC balance we already count, so summing both double-counts collateral.
+If true the tracker overstates equity whenever the engine holds perp positions,
+and understated it before (the HIP-3 omission fixed earlier the same night).
+
+Needed: determine authoritatively whether HL perp `accountValue` is additive to
+spot USDC or a view on it, per-dex. Until then the tracker prints UNRECONCILED
+and tells the operator to trust the flow figure.
+
 ---
 
 ## ANSWERED

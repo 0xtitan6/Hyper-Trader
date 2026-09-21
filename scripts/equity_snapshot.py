@@ -94,6 +94,34 @@ def external_flows() -> float:
     return net
 
 
+def realised_and_unrealised(since_ms: int) -> tuple[float, float, float]:
+    """(realised closedPnl, fees, unrealised) since a timestamp, across ALL dexes.
+
+    This is the independent check on the equity figure. Equity is a balance
+    read; this is a flow read. If they disagree, one of them is wrong and the
+    operator must not be told a number that has not reconciled.
+    """
+    # userFillsByTime, NOT userFills. The latter returns a TRUNCATED window —
+    # measured 2026-09-21: exactly 2000 rows, so filtering it by timestamp
+    # silently drops anything older than the cap and under-reports realised PnL
+    # ($10.98 vs the true $36.23). A reconciliation check that is itself wrong
+    # is worse than none, because it manufactures a phantom gap.
+    recent = post({"type": "userFillsByTime", "user": MASTER,
+                   "startTime": since_ms}) or []
+    realised = sum(float(f.get("closedPnl", 0) or 0) for f in recent)
+    fees = sum(float(f.get("fee", 0) or 0) for f in recent)
+    unreal = 0.0
+    for dex in (None, "xyz", "para", "io"):
+        q = {"type": "clearinghouseState", "user": MASTER}
+        if dex:
+            q["dex"] = dex
+        c = post(q) or {}
+        unreal += sum(float(p["position"]["unrealizedPnl"])
+                      for p in c.get("assetPositions", []))
+        time.sleep(0.1)
+    return realised, fees, unreal
+
+
 def snapshot() -> dict:
     sp = post({"type": "spotClearinghouseState", "user": MASTER}) or {}
     bal = sp.get("balances", [])
@@ -221,6 +249,25 @@ def main() -> int:
         hrs = (s["ts"] - prev["ts"]) / 3600
         print(f"\nTRUE P&L since {prev['iso'][:16]} ({hrs:.1f}h): ${pnl:+,.2f}")
         print("  (equity change with deposits/withdrawals removed)")
+
+        # RECONCILE against the flow record. Equity is a balance read; fills are
+        # a flow read. They must agree, and on 2026-09-21 they did not — equity
+        # claimed +$91.81 while fills and unrealised justified only +$42.87, a
+        # $48.94 gap with no matching ledger transfer. The cause is still
+        # unidentified (suspected double-count of perp collateral against the
+        # unified spot balance). Until it is found, the tracker must SAY SO
+        # rather than print a confident wrong number — an unreconciled P&L is
+        # more dangerous than no P&L, because it gets believed.
+        realised, fees, unreal = realised_and_unrealised(int(prev["ts"] * 1000))
+        explained = realised - fees + unreal
+        gap = pnl - explained
+        print(f"  reconcile: realised {realised:+,.2f} - fees {fees:,.2f} "
+              f"+ unrealised {unreal:+,.2f} = {explained:+,.2f}")
+        if abs(gap) > max(2.0, abs(explained) * 0.05):
+            print(f"  *** UNRECONCILED: ${gap:+,.2f} unexplained — "
+                  f"TREAT ${explained:+,.2f} AS THE REAL NUMBER ***")
+        else:
+            print(f"  reconciled (gap ${gap:+,.2f})")
     else:
         print("\nbaseline recorded — P&L measured from here")
     return 0

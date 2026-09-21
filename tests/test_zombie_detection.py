@@ -726,3 +726,31 @@ def test_minder_cancels_resting_order_on_the_leg_it_hedges():
     hedge_block = src.split("if not KILL.exists():")[1]
     assert hedge_block.index("ex.cancel(hedge_coin") < hedge_block.index("tif\": \"Ioc"), \
         "the cancel must happen BEFORE the IOC, or the resting bid can fill first"
+
+
+def test_equity_reconciles_using_time_bounded_fills():
+    """`userFills` returns a TRUNCATED window — measured 2026-09-21: exactly
+    2000 rows. Filtering that by timestamp silently drops older fills and
+    under-reports realised PnL ($10.98 against a true $36.23), manufacturing a
+    phantom reconciliation gap. A self-check that is itself wrong is worse than
+    no self-check, because it cries wolf and then gets ignored.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "equity_snapshot.py").read_text()
+    assert "userFillsByTime" in src, \
+        "reconciliation must use the time-bounded fills endpoint"
+    fn = src.split("def realised_and_unrealised")[1].split("\ndef ")[0]
+    assert '"userFills"' not in fn, \
+        "the truncated endpoint must not be used for a time-bounded total"
+
+
+def test_equity_refuses_to_report_an_unreconciled_number():
+    """Equity is a balance read, fills are a flow read; they must agree. On
+    2026-09-21 equity claimed +$91.81 while fills justified +$42.87, with no
+    matching ledger transfer. An unreconciled P&L is more dangerous than none
+    because it gets believed, so the tracker must say so loudly.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "equity_snapshot.py").read_text()
+    assert "UNRECONCILED" in src, "must flag when equity and flows disagree"
+    assert "TREAT" in src, "must tell the operator which number to trust"
