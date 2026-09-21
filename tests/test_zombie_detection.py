@@ -598,3 +598,37 @@ def test_pair_sizing_arithmetic_is_balanced():
         # and the payoff is symmetric: whichever side wins, we redeem `shares`
         redeem = shares * 1.0
         assert redeem - shares * pair_px >= 0, "pair below par must not lose"
+
+
+def test_pair_maker_improves_the_touch():
+    """Quoting behind the best bid means never trading.
+
+    Measured 2026-09-21 after five hours of zero fills on books doing ~340
+    trades/day: our bids sat one tick BELOW the touch with $384-$795 of other
+    orders ahead of them — including the incumbent maker's 1000-share block —
+    so nothing could reach us until that whole queue cleared. On one leg we
+    were four levels deep (0.73332 against a 0.73912 touch).
+
+    The original code justified this as stopping a post-only from crossing.
+    That is false: an Alo order only crosses if it reaches the ASK. Resting at
+    or one tick above the best bid never crosses and takes price priority.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "run_pair_maker.py").read_text()
+    assert 'fresh[side]["bid"] - TICK' not in src, \
+        "quoting BELOW the touch queues us behind the whole book — we never fill"
+    assert 'fresh[side]["bid"] + TICK' in src, "must improve the touch"
+    assert 'fresh[side]["ask"]' in src, \
+        "must clamp against the ask so an improved bid can never cross"
+
+
+def test_edge_is_checked_on_the_price_we_actually_pay():
+    """Improving the touch costs a tick a leg. The edge gate must run on the
+    quoted prices, not the raw book, or we book a worse trade than we measured.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "run_pair_maker.py").read_text()
+    assert "edge_quoted" in src, "edge must be recomputed from the quoted prices"
+    body = src.split("def main(")[1]
+    assert body.index("edge_quoted") < body.index("free_usdc[0] -= need"), \
+        "edge gate must precede capital reservation"

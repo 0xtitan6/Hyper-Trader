@@ -70,8 +70,19 @@ KILL = Path(__file__).resolve().parent.parent / "KILL"
 # leaving 116 shares of YES against 27 of NO. A 4:1 directional bet on England
 # that nobody chose — the one-sided shape that cost -$47 on 2026-09-19.
 LOCK = Path("/tmp/hip4-pair-requote.lock")
-# HIP-4 outcome legs price to 5dp; one tick behind the touch keeps a post-only
-# order from ever crossing.
+# HIP-4 outcome legs price to 5dp.
+#
+# WE IMPROVE THE TOUCH BY ONE TICK — we do not sit behind it.
+# Sitting one tick BEHIND the best bid was why we took zero fills in five hours
+# of quoting on books doing ~340 trades/day. Measured 2026-09-21: our bids sat
+# with $384-$795 of other orders ahead of them, including the incumbent maker's
+# 1000-share block, so nothing could reach us until that entire queue cleared.
+# On one leg we were four levels deep (0.73332 against a 0.73912 touch).
+#
+# The old comment claimed sitting behind stopped a post-only from crossing.
+# That is wrong: a post-only (Alo) order only crosses if it reaches the ASK.
+# Resting AT or one tick ABOVE the best bid never crosses and puts us first in
+# line, which is the entire point of quoting.
 TICK = 0.0005
 
 log = logging.getLogger("pairmaker")
@@ -280,7 +291,22 @@ def main() -> int:
         # did not choose. At 60/40 with $20 a side the same error loses $7 if
         # YES wins and makes $10 if NO wins — a coin flip wearing a hedge's
         # clothes.
-        pair_px = fresh[0]["bid"] + fresh[1]["bid"]
+        # Price BOTH legs first, then check the edge on what we will really
+        # pay. Improving the touch costs one tick a leg; if that eats the edge
+        # the surface is not worth quoting and we skip it rather than quietly
+        # booking a worse trade than we measured.
+        quote = {}
+        for side in (0, 1):
+            q = round(fresh[side]["bid"] + TICK, 5)
+            if q >= fresh[side]["ask"]:
+                q = round(fresh[side]["bid"], 5)
+            quote[side] = q
+        pair_px = quote[0] + quote[1]
+        edge_quoted = 1.0 - pair_px
+        if edge_quoted < args.min_edge:
+            log.info("skip oid=%s — edge %.2f%% after improving the touch (was %.2f%%)",
+                     s["oid"], edge_quoted * 100, edge_now * 100)
+            continue
         if pair_px <= 0:
             continue
         shares = int(args.usd_per_leg * 2 / pair_px)   # ONE count for both legs
@@ -302,7 +328,10 @@ def main() -> int:
 
         for side in (0, 1):
             coin = f"#{10 * s['oid'] + side}"
-            px = round(fresh[side]["bid"] - TICK, 5)
+            # Improve the touch to take price priority. Never reach the ask —
+            # Alo would reject it, and we would be paying the spread rather
+            # than earning it.
+            px = quote[side]
             if px <= 0:
                 continue
             # HIP-4 outcome legs trade in WHOLE shares. A fractional size is
