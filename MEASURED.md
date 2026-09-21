@@ -146,6 +146,42 @@ HYPE is the correctly-shaped one: buy the touch at 0.503 against 0.538 fair,
 +7%, loss capped at stake. Caveats: the edge is entirely a vol model, and we
 already hold 2.88 HYPE perp — it stacks exposure.
 
+### Market census — where the flow actually is (2026-09-21, n=201 markets)
+| category | mkts | traded | 24h vol | trades | vol/mkt |
+|---|---|---|---|---|---|
+| **crypto barrier** | 8 | 8 | **$888,708** | 10,808 | **$111,088** |
+| other sport | 46 | 37 | $815,746 | 11,620 | $17,734 |
+| NFL | 28 | 27 | $600,569 | 8,220 | $21,449 |
+| misc | 38 | 17 | $307,736 | 6,570 | $8,098 |
+| index binary (xyz) | 39 | 26 | $262,494 | 2,488 | $6,731 |
+| price binary | 38 | 13 | $23,470 | 232 | $618 |
+| MLB | 4 | 1 | $36 | 4 | $9 |
+
+$2.9M / 39,942 trades in 24h; only **129/201** markets have any flow at all.
+
+**Eight crypto barriers out-trade all 28 NFL markets combined**, at 5-6x the
+volume per market, 24/7, with the underlying fully observable to us.
+
+### …and why we cannot yet trade them (2026-09-21)
+The inverse of the soccer problem — huge flow, no depth:
+
+| oid | target | spread | top-of-book depth | 24h vol | trades |
+|---|---|---|---|---|---|
+| 1209 | HYPE $100 | 7.1% | **$5** | $202,434 | 3,562 |
+| 1213 | BTC $90k | 38.5% | $100 | $176,968 | 1,554 |
+| 1214 | BTC $85k | 4.4% | **$3** | $176,966 | 3,234 |
+
+3,562 trades against $5 of resting size. Nobody stands there because a barrier's
+fair value **moves continuously with the underlying** — unlike a sports line,
+which is static for days. Our requote loop runs every **20 minutes**; against a
+book repricing on every BTC tick that is a standing offer to be picked off, and
+the only fills we would get are the ones where BTC already moved against us.
+
+**Verdict: best surface on the venue, and we are not equipped for it.** Not a
+capital problem — a speed problem. Needs sub-minute repricing off the live mark
+plus perp delta hedging. That is a build, not a config change, and it is the
+most concrete thing on the roadmap.
+
 ---
 
 ## The copy engine
