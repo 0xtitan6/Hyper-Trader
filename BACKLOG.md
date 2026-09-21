@@ -369,3 +369,34 @@ $226.75 proxy) change by no more than rounding when the window is unchanged;
 no fill appears twice by `tid`.
 
 </details>
+
+## Jev classifier for the in-play guard (proposed 2026-09-21)
+
+`src/gamestate.is_safe_to_quote` classifies market descriptions with keyword
+matching (`EVENT_TOKENS`, token-overlap on team names). It has returned a
+confidently wrong answer three times:
+
+| date | failure | consequence |
+|---|---|---|
+| 09-20 | `competition:`-keyed NFL waved through as "not an event market" | 8 live games quotable |
+| 09-20 | "England" token-matched "New England Patriots" | reported IN PLAY at 7-0 |
+| 09-20 | UFC 331 unresolvable, guard allowed it | both legs resting on finished fights |
+
+Each was a clean-looking wrong answer, not an error — the failure mode of a bad
+schema, not of a bad model.
+
+This fits the classifier band: bounded answer space
+(`quotable / in-play / unresolved`), unstructured text input, called on every
+market every cycle. `TYPESAFE_API_KEY` is already in the env.
+
+**Keep from the current design:** default to REFUSE when uncertain, and route
+below-threshold cases to refusal rather than to a guess. The guard's value is
+that it is wrong in the safe direction.
+
+**Do NOT extend this to the operator health check.** That path is already a
+zero-token shell script (`scripts/operator_tier1.sh`); its inputs are structured
+numbers and a threshold beats a classifier there. Adding a model would be a
+regression — see the 991k-tokens/day note in that file.
+
+Blocked on: nothing. Sized: half a day. Priority: below the barrier maker and
+below measuring fill rate, since the guard currently fails safe.
