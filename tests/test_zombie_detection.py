@@ -703,3 +703,26 @@ def test_real_engine_death_still_escalates():
     assert 'enabled == "disabled"' in line, \
         "suppression must require systemd `disabled`, not merely `inactive`"
     assert 'active != "active"' in line
+
+
+def test_minder_cancels_resting_order_on_the_leg_it_hedges():
+    """Completing a basket must not leave our own bid alive on the hedge leg.
+
+    A one-sided position usually arises because a PAIR was quoted and only one
+    leg filled, so our bid on the other leg is still resting. Hedging with an
+    IOC completes the basket but leaves that bid live; if it fills we hold
+    twice the hedge leg and are naked by the excess.
+
+    Measured 2026-09-21: after the minder completed two baskets, the original
+    bids were still resting — 202 shares on Giants YES against an 80/80 basket,
+    151 on Croatia YES against 151/151. Filling either would have left us naked
+    by up to 202 shares on a binary, the exact exposure the minder exists to
+    prevent.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "pair_minder.py").read_text()
+    assert "cancel_before_hedge" in src, \
+        "minder must cancel its own resting order on the leg it is hedging into"
+    hedge_block = src.split("if not KILL.exists():")[1]
+    assert hedge_block.index("ex.cancel(hedge_coin") < hedge_block.index("tif\": \"Ioc"), \
+        "the cancel must happen BEFORE the IOC, or the resting bid can fill first"

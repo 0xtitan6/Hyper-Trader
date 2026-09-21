@@ -224,8 +224,37 @@ def main() -> int:
             log.error("cancel failed %s: %s", o["coin"], e)
 
     if not KILL.exists():
+        open_by_coin: dict[str, list] = {}
+        for o in orders:
+            open_by_coin.setdefault(o["coin"], []).append(o)
+
         for coin, sz, oid, side, comp in one_sided:
             hedge_coin = f"#{oid}{1 - side}"
+
+            # CANCEL THE RESTING ORDER ON THE LEG WE ARE ABOUT TO BUY.
+            #
+            # The one-sided position usually arose because a PAIR was quoted and
+            # only one leg filled — so our own bid on the other leg is still
+            # resting. Hedging with an IOC completes the basket, but leaves that
+            # bid alive; if it then fills we are long TWICE the hedge leg and
+            # naked by the excess.
+            #
+            # Measured 2026-09-21: after the minder completed two baskets, the
+            # original bids were still resting — 202 shares on Giants YES
+            # against an 80/80 basket, and 151 on Croatia YES against 151/151.
+            # Had they filled we would have held 282 vs 80: naked by 202 shares
+            # on a binary, which is the exact exposure this script exists to
+            # prevent.
+            for o in open_by_coin.get(hedge_coin, []):
+                try:
+                    ex.cancel(hedge_coin, o["oid"])
+                    log.info("cancelled own resting %s %s @ %s before hedging",
+                             hedge_coin, o["sz"], o["limitPx"])
+                    record("cancel_before_hedge", coin=hedge_coin,
+                           sz=o["sz"], px=o["limitPx"])
+                except Exception as e:  # noqa: BLE001
+                    log.error("could not cancel %s before hedging: %s", hedge_coin, e)
+                time.sleep(0.2)
             book = post({"type": "l2Book", "coin": hedge_coin})
             lv = (book or {}).get("levels") or []
             if len(lv) < 2 or not lv[1]:

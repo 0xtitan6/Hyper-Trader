@@ -156,6 +156,36 @@ presence but were structurally unable to take a single maker fill — **60% of t
 pool was unreachable by construction.** Fixed 2026-09-21; first epoch quoting at
 the front of the book is the real test.
 
+### FIRST REAL FILLS — and they lost money (2026-09-21, n=2 pairs)
+After fixing the queue-position bug, the first maker fills arrived within 4h:
+
+| time | role | leg | price |
+|---|---|---|---|
+| 06:01:30 | **MAKER** | Giants NO | 0.72818 |
+| 06:07:37 | taker | Giants YES | 0.28238 (minder hedge) |
+| 06:41:57 | **MAKER** | Croatia NO | 0.57422 |
+| 06:42:36 | taker | Croatia YES | 0.42790 (minder hedge) |
+
+The machinery worked: one leg filled, the minder detected the one-sided position
+and completed the basket within 6 minutes, no naked overnight exposure.
+
+**But both baskets completed ABOVE par:**
+```
+Giants   0.72818 + 0.28238 = 1.01056  x 80 -> redeems $80   = -$0.84
+Croatia  0.57422 + 0.42790 = 1.00212  x151 -> redeems $151  = -$0.32
+                                                     total   -$1.16
+```
+A quoted edge of +1.25% realised as **-0.8%**. This is adverse selection, stated
+precisely: *the leg that fills is the leg the market is moving away from*. By
+the time we crossed for the other leg it had repriced, and the hedge cost more
+than the edge.
+
+n=2. Not conclusive, but it is the first real evidence about the economics
+rather than the mechanics, and the sign is negative. The open question is
+whether `MAX_PAIR_COST = 1.02` should tighten: hedging above par locks a small
+loss, but NOT hedging leaves a coin flip on a binary, which is worse variance
+for the same expected value.
+
 ### Measured dead ends — do not re-research
 - **YES+NO complement arb**: closed. Min sum 1.00001 across 213 outcomes.
 - **Favourite-longshot bias**: absent. Slope 1.034, p=0.74.
