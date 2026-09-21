@@ -20,6 +20,19 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# SERIALISE. The maker reserves capital for both legs from a balance it read at
+# start-up, so two concurrent runs each believe they can afford a pair and race.
+# Measured 2026-09-21: a manual run and this cron both fired at 22:31:23 on the
+# same surface. The cron won the YES leg and then had no capital for the NO,
+# leaving 116 shares of YES against 27 of NO — a 4:1 directional bet on England
+# that nobody chose. That is the one-sided shape that cost -$47 on 09-19.
+# flock makes a second runner exit immediately rather than half-enter a pair.
+exec 9>/tmp/hip4-pair-requote.lock
+if ! flock -n 9; then
+  echo "$(date -u +%FT%TZ) [lock] another pair-maker run in progress — skipping" >> state/pair_requote.log
+  exit 0
+fi
+
 USD_PER_LEG=${USD_PER_LEG:-20}
 MAX_PAIRS=${MAX_PAIRS:-2}
 MIN_EDGE=${MIN_EDGE:-0.010}

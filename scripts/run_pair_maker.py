@@ -41,6 +41,7 @@ is high enough to matter, having measured 0 paired fills in 6 attempts so far.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import logging
 import sys
 import time
@@ -61,6 +62,14 @@ MASTER = "0xE503186067b1B0Fb973c063054B14c4625434A1a"
 ENV = "/home/ec2-user/.config/hyper-trader/copytrader.env"
 INFO = "https://api.hyperliquid.xyz/info"
 KILL = Path(__file__).resolve().parent.parent / "KILL"
+# Only one maker may hold capital-reservation state at a time. The reservation
+# is computed from a balance read at start-up, so two concurrent runs each
+# believe they can afford a pair and both place a first leg. Measured
+# 2026-09-21: a manual run and the 20-minute cron fired at 22:31:23 on the same
+# surface; the cron placed its YES leg and then had no capital for the NO,
+# leaving 116 shares of YES against 27 of NO. A 4:1 directional bet on England
+# that nobody chose — the one-sided shape that cost -$47 on 2026-09-19.
+LOCK = Path("/tmp/hip4-pair-requote.lock")
 # HIP-4 outcome legs price to 5dp; one tick behind the touch keeps a post-only
 # order from ever crossing.
 TICK = 0.0005
@@ -192,6 +201,15 @@ def main() -> int:
         print("KILL present — refusing to quote")
         return 3
 
+    # Held for the life of the process; released when it exits for any reason.
+    lock_fd = open(LOCK, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("another pair-maker run holds the lock — refusing to quote "
+              "(concurrent runs half-enter pairs)")
+        return 4
+
     gs = GameState()
     if not gs.refresh():
         print("score feed unreachable — refusing to quote (fail safe)")
@@ -253,14 +271,32 @@ def main() -> int:
                      s["oid"], s["edge"] * 100, edge_now * 100)
             continue
 
+        # SIZE BY SHARES, NOT BY DOLLARS. A basket redeems $1.00 per matched
+        # PAIR of shares, so the hedge is N shares of YES against N shares of
+        # NO. Equal dollars per leg buys unequal shares — it always overweights
+        # the cheap leg, because cheap means unlikely. Measured 2026-09-21: at
+        # $15/leg on a 0.7367/0.2503 book this placed 20 YES against 59 NO. Only
+        # 20 shares were hedged; the other 39 were a naked directional bet we
+        # did not choose. At 60/40 with $20 a side the same error loses $7 if
+        # YES wins and makes $10 if NO wins — a coin flip wearing a hedge's
+        # clothes.
+        pair_px = fresh[0]["bid"] + fresh[1]["bid"]
+        if pair_px <= 0:
+            continue
+        shares = int(args.usd_per_leg * 2 / pair_px)   # ONE count for both legs
+        if shares < 1:
+            log.info("skip oid=%s — $%.2f buys less than one full pair at %.4f",
+                     s["oid"], args.usd_per_leg * 2, pair_px)
+            continue
+
         # Reserve capital for BOTH legs before placing EITHER. Running out
         # mid-surface leaves a lone resting bid, which is a directional bet we
         # did not choose — the exact shape that cost $47 on 2026-09-19. Better to
         # skip a surface entirely than to half-enter it.
-        need = args.usd_per_leg * 2
+        need = shares * pair_px
         if free_usdc[0] < need:
-            log.info("skip oid=%s — $%.2f free, need $%.2f for both legs",
-                     s["oid"], free_usdc[0], need)
+            log.info("skip oid=%s — $%.2f free, need $%.2f for %d-share pair",
+                     s["oid"], free_usdc[0], need, shares)
             continue
         free_usdc[0] -= need
 
@@ -273,11 +309,7 @@ def main() -> int:
             # rejected with {"error": "Order has invalid size."} — measured
             # 2026-09-20 after 8 orders silently failed because the code only
             # read statuses[0].resting and never looked at .error.
-            sz = float(int(args.usd_per_leg / px))
-            if sz < 1:
-                log.info("skip %s — $%.2f buys less than one share at %.5f",
-                         coin, args.usd_per_leg, px)
-                continue
+            sz = float(shares)   # SAME share count on both legs — see above
             try:
                 r = ex.order(coin, True, sz, px,
                              order_type={"limit": {"tif": "Alo"}},   # post-only: never take

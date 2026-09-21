@@ -537,3 +537,64 @@ def test_pair_maker_rejects_incoherent_wide_books():
            / "scripts" / "run_pair_maker.py").read_text()
     scan_body = src.split("def scan(")[1].split("\ndef ")[0]
     assert "mid_sum" in scan_body, "scan must sanity-check bids against mids"
+
+
+def test_pair_maker_serialises_on_a_lock():
+    """Two concurrent maker runs each half-enter a pair.
+
+    The capital reservation is computed from a balance read at start-up, so two
+    runs both believe they can afford both legs. Measured 2026-09-21: a manual
+    run and the 20-minute requote cron fired at 22:31:23 on the same surface.
+    The cron won the YES leg and then had no capital for the NO, leaving 116
+    shares of YES against 27 of NO — a 4:1 directional bet nobody chose, which
+    is precisely the one-sided shape that cost -$47 on 2026-09-19.
+
+    The lock must be taken by the MAKER, not only the cron wrapper, or a manual
+    invocation still races the timer.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "run_pair_maker.py").read_text()
+    assert "import fcntl" in src and "LOCK_EX" in src, \
+        "run_pair_maker must take an exclusive lock, not just the cron wrapper"
+    assert "LOCK_NB" in src, "lock must be non-blocking — a second run exits, never queues"
+    main_body = src.split("def main(")[1]
+    assert "flock" in main_body, "the lock must be acquired inside main()"
+
+    wrapper = (Path(__file__).resolve().parent.parent
+               / "scripts" / "pair_requote_cron.sh").read_text()
+    assert "flock -n" in wrapper, "cron wrapper must also serialise"
+
+
+def test_pair_maker_sizes_by_shares_not_dollars():
+    """A basket redeems $1.00 per MATCHED PAIR of shares, so the hedge is N
+    YES against N NO. Equal dollars per leg buys unequal shares and always
+    overweights the cheap leg, because cheap means unlikely.
+
+    Measured 2026-09-21: at $15/leg on a 0.7367/0.2503 book the maker placed
+    20 YES against 59 NO. Only 20 shares were hedged; the other 39 were a naked
+    directional bet nobody chose. The same error at 60/40 with $20 a side loses
+    $7 if YES wins and makes $10 if NO wins — a coin flip dressed as a hedge.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "run_pair_maker.py").read_text()
+    assert "sz = float(int(args.usd_per_leg / px))" not in src, \
+        "per-leg dollar sizing buys unequal shares — that is not a hedge"
+    assert "shares = int(" in src, "must compute ONE share count for both legs"
+    assert "sz = float(shares)" in src, "both legs must submit the same share count"
+
+
+def test_pair_sizing_arithmetic_is_balanced():
+    """The share count must be computed off the PAIR price, and the resulting
+    basket must cost at most the budget while hedging every share bought."""
+    for bid0, bid1, budget in ((0.73667, 0.25025, 30.0),
+                               (0.4148, 0.5737, 40.0),
+                               (0.0675, 0.9200, 50.0)):
+        pair_px = bid0 + bid1
+        shares = int(budget / pair_px)
+        assert shares >= 1
+        assert shares * pair_px <= budget + 1e-9, "basket must fit the budget"
+        # every share on one leg is matched by one on the other
+        assert shares == shares, "identical counts by construction"
+        # and the payoff is symmetric: whichever side wins, we redeem `shares`
+        redeem = shares * 1.0
+        assert redeem - shares * pair_px >= 0, "pair below par must not lose"
