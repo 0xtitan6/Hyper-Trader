@@ -400,3 +400,33 @@ regression — see the 991k-tokens/day note in that file.
 
 Blocked on: nothing. Sized: half a day. Priority: below the barrier maker and
 below measuring fill rate, since the guard currently fails safe.
+
+## Oil outcome markets — does HIP-4 lag the oil price? (proposed 2026-09-21)
+
+Operator's idea: trade oil outcomes on Gulf/geopolitical flow. The tradeable
+version drops the news half and keeps the measurable half.
+
+`perp:xyz:CL` exists and trades (5.2% spread, 25 trades, $3,150 in 24h as of
+2026-09-21). Unlike sports, oil has a **continuously observable reference** —
+Brent/WTI print in real time and HL runs its own oil perp — so the question is
+testable rather than speculative:
+
+**Does the HIP-4 oil outcome market reprice BEFORE or AFTER the underlying?**
+
+Run the same experiment that closed in-play sports (see MEASURED.md): sample the
+outcome mid and the reference price together every few seconds and count which
+moves first. In-play NFL came back 22 price-moves-before-score to 2 after, which
+killed it. If oil comes back the other way, it is a real edge on a surface where
+we can actually see the input.
+
+Why the news angle is the weaker half: Reuters/Bloomberg latency is where
+professional desks spend millions and we would be seconds behind. But we may not
+need the news — if the oil PRICE moves first and the outcome market follows, the
+signal is free and public.
+
+Prerequisite: 25 trades/24h is thin. Check whether flow is real before building;
+depth is not flow (see the Kosovo/Greece finding).
+
+Blocked on: nothing. Sized: 1h to measure, then decide. Priority: after the
+fill-rate read, alongside the crypto-barrier maker — both are "observable
+underlying" plays and share the same repricing machinery.
