@@ -632,3 +632,24 @@ def test_edge_is_checked_on_the_price_we_actually_pay():
     body = src.split("def main(")[1]
     assert body.index("edge_quoted") < body.index("free_usdc[0] -= need"), \
         "edge gate must precede capital reservation"
+
+
+def test_equity_snapshot_counts_hip3_dexes():
+    """HIP-3 builder dexes are separate clearinghouses with their own
+    collateral and never appear in a plain clearinghouseState call.
+
+    Measured 2026-09-21: immediately after flattening the base perp book, the
+    equity tracker reported $2,702.70 while $133.06 sat on the xyz ($114.41)
+    and para ($18.65) dexes. To the operator that money simply vanished from
+    the account — the single worst failure mode for a P&L tracker, because a
+    wrong number is trusted exactly as much as a right one.
+
+    This is INVARIANT #1 and it still caught a tracker written an hour earlier.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "equity_snapshot.py").read_text()
+    assert '"dex"' in src, "must query per-dex clearinghouse state"
+    for dex in ("xyz", "para", "io"):
+        assert f'"{dex}"' in src, f"{dex} dex collateral must be counted"
+    assert "per_dex" in src and "perp += sum(per_dex.values())" in src, \
+        "per-dex balances must be ADDED to equity, not merely reported"

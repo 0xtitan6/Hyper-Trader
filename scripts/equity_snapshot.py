@@ -128,9 +128,24 @@ def snapshot() -> dict:
         bid = float(lv[0][0]["px"]) if lv and lv[0] else 0.0
         legs_value += sz * bid
 
+    # PER-DEX. HIP-3 builder dexes are SEPARATE clearinghouses holding their own
+    # collateral; they never appear in a plain clearinghouseState call. Measured
+    # 2026-09-21: after flattening the base perp book this tracker reported
+    # equity $2,702.70 while $133.06 sat on the xyz ($114.41) and para ($18.65)
+    # dexes — money the operator would have seen simply vanish. This is
+    # INVARIANT #1 in INVARIANTS.md and it still caught a tracker written an
+    # hour earlier. Never sum a single clearinghouseState and call it the book.
     ch = post({"type": "clearinghouseState", "user": MASTER}) or {}
     ms = ch.get("marginSummary", {})
     perp = float(ms.get("accountValue", 0) or 0)
+    per_dex = {}
+    for dex in ("xyz", "para", "io"):
+        d = post({"type": "clearinghouseState", "user": MASTER, "dex": dex})
+        v = float(((d or {}).get("marginSummary") or {}).get("accountValue", 0) or 0)
+        if v:
+            per_dex[dex] = round(v, 2)
+        time.sleep(0.1)
+    perp += sum(per_dex.values())
     upnl = sum(float(p["position"]["unrealizedPnl"])
                for p in ch.get("assetPositions", []))
     maint = float(ch.get("crossMaintenanceMarginUsed", 0) or 0)
@@ -154,6 +169,7 @@ def snapshot() -> dict:
         "spot_free": round(spot_total - spot_hold, 2),
         "outcome_legs": round(legs_value, 2),
         "perp": round(perp, 2),
+        "perp_by_dex": per_dex,
         "perp_upnl": round(upnl, 2),
         "perp_maint_pct": round(maint / perp * 100, 1) if perp else 0.0,
         "vault": round(vault, 2),
@@ -195,6 +211,8 @@ def main() -> int:
     print(f"  spot USDC   ${s['spot_usdc']:>10,.2f}   (free ${s['spot_free']:,.2f})")
     print(f"  outcome legs${s['outcome_legs']:>10,.2f}")
     print(f"  perp        ${s['perp']:>10,.2f}   (upnl {s['perp_upnl']:+.2f}, maint {s['perp_maint_pct']}%)")
+    if s["perp_by_dex"]:
+        print(f"    per-dex   {s['perp_by_dex']}")
     print(f"  HLP vault   ${s['vault']:>10,.2f}")
     print(f"quoting       ${s['resting_orders']:>10,.2f} across {s['n_orders']} legs")
     print(f"net deposits  ${s['net_deposits']:>10,.2f}")
