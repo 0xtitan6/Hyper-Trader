@@ -50,6 +50,82 @@ KILL = ROOT / "KILL"
 LEDGER = ROOT / "state" / "pair_minder.jsonl"
 
 MAX_PAIR_COST = 1.02      # beyond this, hedging is EV-neutral — do not bother
+
+# PASSIVE HEDGING.
+#
+# Crossing the spread the instant a leg fills is correct for a live event and
+# wrong for a book days from kickoff. Measured 2026-09-21, our first two real
+# fills: the minder crossed within 6 minutes and both baskets completed ABOVE
+# par (1.01056 and 1.00212), turning a quoted +1.25% edge into a realised
+# -0.80%. The fill you get is the leg the market is moving away from, so by the
+# time you cross, the other side has repriced past your edge.
+#
+# With days to run there is no reason to pay that spread. Rest a bid at the
+# price that still clears a profit and let it come to you; escalate to crossing
+# only when the clock forces it.
+HEDGE_TARGET_TOTAL = 0.995   # basket cost to aim for => +0.5% locked
+PASSIVE_MAX_H = 24.0         # give a passive hedge this long before crossing
+CROSS_DEADLINE_H = 4.0       # inside this to kickoff, complete at market
+MIN_HEDGE_PX = 0.002         # below this a bid is noise, not a quote
+
+
+def hedge_decision(paid: float, bid: float, ask: float,
+                   hours_to_event: float | None, position_age_h: float,
+                   resting_px: float | None) -> dict:
+    """Decide how to complete a one-sided basket. Pure function, so it can be
+    tested against the cases that actually cost money.
+
+    Returns {"action": CROSS|REST|KEEP|HOLD, "px": float|None, "reason": str}.
+
+      CROSS  take the ask now — either it is already profitable, or the clock
+             has run out and locking a small loss beats holding a coin flip
+      REST   post a bid at the price that still clears HEDGE_TARGET_TOTAL
+      KEEP   a correct passive hedge is already resting; leave it alone
+      HOLD   completing would cost more than MAX_PAIR_COST; a naked leg is bad
+             but locking a >2% loss to fix it is worse
+    """
+    target_px = round(HEDGE_TARGET_TOTAL - paid, 5)
+    cross_cost = paid + ask
+
+    # 1. The ask is already cheap enough to clear our target. Free — take it.
+    if ask <= target_px:
+        return {"action": "CROSS", "px": ask,
+                "reason": f"ask {ask:.5f} already clears target "
+                          f"(basket {cross_cost:.5f} <= {HEDGE_TARGET_TOTAL})"}
+
+    # 2. Clock forcing. Inside the deadline, or the position has sat too long.
+    #    A resting bid that never fills leaves us naked into the event, which is
+    #    the exposure this whole script exists to prevent.
+    forced = (hours_to_event is not None and hours_to_event < CROSS_DEADLINE_H)
+    aged = position_age_h > PASSIVE_MAX_H
+    if forced or aged:
+        why = (f"kickoff in {hours_to_event:.1f}h" if forced
+               else f"position {position_age_h:.1f}h old")
+        if cross_cost > MAX_PAIR_COST:
+            return {"action": "HOLD", "px": None,
+                    "reason": f"{why} but crossing costs {cross_cost:.5f} > "
+                              f"{MAX_PAIR_COST} — locking that beats nothing"}
+        return {"action": "CROSS", "px": ask,
+                "reason": f"{why} — completing at {cross_cost:.5f} "
+                          f"({(1.0 - cross_cost) * 100:+.2f}%)"}
+
+    # 3. No room left: we already paid more than the whole target basket.
+    if target_px < MIN_HEDGE_PX:
+        return {"action": "HOLD", "px": None,
+                "reason": f"paid {paid:.5f} leaves only {target_px:.5f} for the "
+                          f"hedge — no passive price exists"}
+
+    # 4. Already resting at (or better than) the right price — do not churn.
+    if resting_px is not None and resting_px <= target_px + 1e-9:
+        return {"action": "KEEP", "px": resting_px,
+                "reason": f"passive hedge already resting at {resting_px:.5f}"}
+
+    # 5. Rest a bid that still clears a profit. Never above the ask (that would
+    #    cross and become the very taker fill we are avoiding).
+    px = min(target_px, round(ask - 0.0005, 5))
+    return {"action": "REST", "px": px,
+            "reason": f"resting at {px:.5f} for basket {paid + px:.5f} "
+                      f"({(1.0 - paid - px) * 100:+.2f}%); ask {ask:.5f} too dear"}
 # KICKOFF_BUFFER_H is imported from src.gamestate so the maker and the minder
 # can never disagree about when a pre-match book stops being pre-match.
 
@@ -100,6 +176,32 @@ def outcome_desc() -> dict[int, str]:
     return {o["outcome"]: o.get("description", "") for o in meta.get("outcomes", [])}
 
 
+def hours_to_event(gs: GameState, description: str) -> float | None:
+    """Hours until the contest starts, or None if we cannot tell.
+
+    Returns None rather than guessing — the caller treats unknown as "no clock
+    pressure", and the separate kickoff-cancel pass still pulls quotes."""
+    st = gs.scheduled_start(description)
+    if st is None:
+        return None
+    return (st - datetime.now(tz=timezone.utc)).total_seconds() / 3600.0
+
+
+def opened_times() -> dict[str, float]:
+    """Epoch seconds of the FIRST fill on each outcome leg we hold, so a passive
+    hedge can be aged out rather than resting forever."""
+    fills = post({"type": "userFills", "user": MASTER}) or []
+    first: dict[str, float] = {}
+    for f in fills:
+        c = f.get("coin", "")
+        if not c.startswith("#") or f.get("dir") == "Settlement":
+            continue
+        key = "+" + c.lstrip("#")
+        t = f["time"] / 1000.0
+        first[key] = min(first.get(key, t), t)
+    return first
+
+
 def record(event: str, **kw) -> None:
     LEDGER.parent.mkdir(parents=True, exist_ok=True)
     with LEDGER.open("a") as f:
@@ -121,6 +223,7 @@ def main() -> int:
     basis = cost_basis()
     gs = GameState()
     feed_ok = gs.refresh()
+    opened_at = opened_times()
 
     actions: list[str] = []
 
@@ -134,31 +237,42 @@ def main() -> int:
             continue          # already a complete basket
         one_sided.append((coin, sz, oid, side, comp))
 
+    # Resting orders keyed by coin, so we can see an existing passive hedge.
+    resting_by_coin: dict[str, list] = {}
+    for o in orders:
+        resting_by_coin.setdefault(o["coin"], []).append(o)
+
+    decisions = []
     for coin, sz, oid, side, comp in one_sided:
         hedge_coin = f"#{oid}{1 - side}"
         book = post({"type": "l2Book", "coin": hedge_coin})
         lv = (book or {}).get("levels") or []
-        if len(lv) < 2 or not lv[1]:
+        if len(lv) < 2 or not lv[0] or not lv[1]:
             actions.append(f"ESCALATE {coin}: one-sided, no book on {hedge_coin} to hedge into")
             record("hedge_no_book", coin=coin, hedge=hedge_coin, sz=sz)
             continue
-        ask = float(lv[1][0]["px"])
+        bid, ask = float(lv[0][0]["px"]), float(lv[1][0]["px"])
         paid = basis.get(coin)
         if paid is None:
             actions.append(f"ESCALATE {coin}: holding it but no fill found — cannot price a hedge")
             record("hedge_no_basis", coin=coin, sz=sz)
             continue
-        pair_cost = paid + ask          # WHAT WE PAID, not what it is worth now
-        if pair_cost > MAX_PAIR_COST:
-            actions.append(
-                f"HOLD {coin} sz={sz:.0f}: paid {paid:.5f}, hedge asks {ask:.5f} "
-                f"=> pair {pair_cost:.4f} > {MAX_PAIR_COST}. Hedging locks "
-                f"{(1.0 - pair_cost) * 100:+.2f}% — EV-neutral vs holding, not a recovery.")
-            record("hedge_skipped", coin=coin, paid=paid, ask=ask, pair_cost=pair_cost, sz=sz)
-            continue
-        actions.append(f"HEDGE {coin} sz={sz:.0f} paid {paid:.5f} -> buy {hedge_coin} @ {ask:.5f} "
-                       f"(pair {pair_cost:.4f}, locks {(1.0 - pair_cost) * 100:+.2f}%)")
-        record("hedge_needed", coin=coin, hedge=hedge_coin, sz=sz, ask=ask, pair_cost=pair_cost)
+
+        hrs = hours_to_event(gs, desc.get(oid, "")) if feed_ok else None
+        age_h = (time.time() - opened_at.get(coin, time.time())) / 3600.0
+        rp = resting_by_coin.get(hedge_coin)
+        resting_px = min(float(o["limitPx"]) for o in rp) if rp else None
+
+        d = hedge_decision(paid=paid, bid=bid, ask=ask, hours_to_event=hrs,
+                           position_age_h=age_h, resting_px=resting_px)
+        d.update(coin=coin, sz=sz, hedge_coin=hedge_coin, paid=paid,
+                 ask=ask, existing=rp or [])
+        decisions.append(d)
+        actions.append(f"{d['action']} {coin} sz={sz:.0f} paid={paid:.5f} -> "
+                       f"{hedge_coin}: {d['reason']}")
+        record("hedge_decision", coin=coin, hedge=hedge_coin, sz=sz,
+               action=d["action"], px=d["px"], paid=paid, ask=ask,
+               hours_to_event=hrs, age_h=round(age_h, 2), reason=d["reason"])
 
     # --- 2. quotes that are about to become in-play quotes -------------------
     stale_orders = []
@@ -224,54 +338,53 @@ def main() -> int:
             log.error("cancel failed %s: %s", o["coin"], e)
 
     if not KILL.exists():
-        open_by_coin: dict[str, list] = {}
-        for o in orders:
-            open_by_coin.setdefault(o["coin"], []).append(o)
+        for d in decisions:
+            hedge_coin, sz = d["hedge_coin"], d["sz"]
+            if d["action"] in ("HOLD", "KEEP"):
+                continue
 
-        for coin, sz, oid, side, comp in one_sided:
-            hedge_coin = f"#{oid}{1 - side}"
-
-            # CANCEL THE RESTING ORDER ON THE LEG WE ARE ABOUT TO BUY.
+            # Cancel our own resting order on the leg we are about to act on.
             #
             # The one-sided position usually arose because a PAIR was quoted and
-            # only one leg filled — so our own bid on the other leg is still
-            # resting. Hedging with an IOC completes the basket, but leaves that
-            # bid alive; if it then fills we are long TWICE the hedge leg and
-            # naked by the excess.
-            #
-            # Measured 2026-09-21: after the minder completed two baskets, the
-            # original bids were still resting — 202 shares on Giants YES
-            # against an 80/80 basket, and 151 on Croatia YES against 151/151.
-            # Had they filled we would have held 282 vs 80: naked by 202 shares
-            # on a binary, which is the exact exposure this script exists to
-            # prevent.
-            for o in open_by_coin.get(hedge_coin, []):
+            # only one leg filled, so our bid on the other leg is still resting.
+            # Completing the basket while it stays alive means that if it later
+            # fills we hold TWICE the hedge leg and are naked by the excess.
+            # Measured 2026-09-21: after two baskets completed, 202 shares were
+            # still resting on Giants YES against an 80/80 basket, and 151 on
+            # Croatia YES against 151/151.
+            for o in d["existing"]:
                 try:
                     ex.cancel(hedge_coin, o["oid"])
-                    log.info("cancelled own resting %s %s @ %s before hedging",
-                             hedge_coin, o["sz"], o["limitPx"])
-                    record("cancel_before_hedge", coin=hedge_coin,
-                           sz=o["sz"], px=o["limitPx"])
+                    log.info("cancelled own resting %s %s @ %s", hedge_coin, o["sz"], o["limitPx"])
+                    record("cancel_before_hedge", coin=hedge_coin, sz=o["sz"], px=o["limitPx"])
                 except Exception as e:  # noqa: BLE001
-                    log.error("could not cancel %s before hedging: %s", hedge_coin, e)
+                    log.error("could not cancel %s: %s", hedge_coin, e)
                 time.sleep(0.2)
-            book = post({"type": "l2Book", "coin": hedge_coin})
-            lv = (book or {}).get("levels") or []
-            if len(lv) < 2 or not lv[1]:
-                continue
-            ask = float(lv[1][0]["px"])
-            paid = basis.get(coin)
-            if paid is None or paid + ask > MAX_PAIR_COST:
-                continue
+
             try:
-                # Whole shares only, and take it — immediacy is the entire point.
-                r = ex.order(hedge_coin, True, float(int(sz)), round(ask * 1.01, 5),
-                             order_type={"limit": {"tif": "Ioc"}}, reduce_only=False,
-                             builder={"b": BUILDER, "f": 0})
-                log.info("hedged %s with %s: %s", coin, hedge_coin, str(r)[:140])
-                record("hedged", coin=coin, hedge=hedge_coin, sz=sz, result=str(r)[:200])
+                if d["action"] == "CROSS":
+                    # Immediacy is the point: pay up to the ask, IOC.
+                    r = ex.order(hedge_coin, True, float(int(sz)),
+                                 round(d["px"] * 1.01, 5),
+                                 order_type={"limit": {"tif": "Ioc"}}, reduce_only=False,
+                                 builder={"b": BUILDER, "f": 0})
+                else:  # REST — post-only, never cross, let it come to us
+                    r = ex.order(hedge_coin, True, float(int(sz)), d["px"],
+                                 order_type={"limit": {"tif": "Alo"}}, reduce_only=False,
+                                 builder={"b": BUILDER, "f": 0})
+                st = (r.get("response", {}).get("data", {}).get("statuses") or [{}])[0]
+                if "error" in st:
+                    log.error("%s %s REJECTED: %s", d["action"], hedge_coin, st["error"])
+                    record("hedge_rejected", coin=hedge_coin, action=d["action"],
+                           px=d["px"], error=st["error"])
+                else:
+                    log.info("%s %s sz=%s @ %s -> %s", d["action"], hedge_coin,
+                             int(sz), d["px"], str(st)[:100])
+                    record("hedged", coin=d["coin"], hedge=hedge_coin, sz=sz,
+                           action=d["action"], px=d["px"], basket=d["paid"] + d["px"])
             except Exception as e:  # noqa: BLE001
                 log.error("hedge failed %s: %s", hedge_coin, e)
+            time.sleep(0.4)
 
     return 1
 

@@ -186,6 +186,34 @@ whether `MAX_PAIR_COST = 1.02` should tighten: hedging above par locks a small
 loss, but NOT hedging leaves a coin flip on a binary, which is worse variance
 for the same expected value.
 
+### Passive hedging does NOT beat crossing (2026-09-21, n=2,307 paths)
+Proposed fix for the -0.8% realised edge: when a leg fills, rest a bid at a
+price that still clears profit instead of crossing the spread. Backtested on 34
+markets, 14d of hourly candles, 24h horizon.
+
+| | |
+|---|---|
+| passive hedge fills within 24h | **49.6%**, at +0.50% each |
+| of the 50.4% unfilled, waiting IMPROVED the cross | **29%** (71% got worse) |
+| EV cross immediately | **-0.78%** |
+| EV passive-then-deadline | **-0.93%** |
+
+**The fix is worse.** A first pass showed +0.25% by scoring unfilled hedges as
+zero; once the 50% that must cross at the deadline are counted honestly, the
+advantage inverts. Waiting does not help because the market keeps moving in the
+direction that filled us — adverse selection is indifferent to when we cross.
+
+**Caveat, stated because it weakens the conclusion:** historical books are not
+available, so the complement's ask was synthesised as `close x 1.01`. The FILL
+RATE is measured (real candle lows); the EV comparison leans on an assumed
+spread and is weak evidence. Neither mode is proven — but nothing supports
+shipping passive as an improvement.
+
+Kept the `hedge_decision` function anyway: it crosses when already profitable,
+enforces a T-4h deadline, ages positions out, and fixed the bug that left our
+own bid resting on the leg just hedged (202 shares from naked). Those are
+correctness wins independent of the passive question.
+
 ### Measured dead ends — do not re-research
 - **YES+NO complement arb**: closed. Min sum 1.00001 across 213 outcomes.
 - **Favourite-longshot bias**: absent. Slope 1.034, p=0.74.
