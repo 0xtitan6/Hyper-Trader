@@ -73,8 +73,14 @@ INFO = "https://api.hyperliquid.xyz/info"
 KILL = ROOT / "KILL"
 LOCK = Path("/tmp/hip4-roundtrip.lock")
 LEDGER = ROOT / "state" / "roundtrip.jsonl"
+# Surfaces this strategy owns. The minder reads this and keeps its hands off:
+# single-leg inventory here is INTENDED, and pairing it off converts a +3.8bps
+# round trip into the -18.3bps cross-and-settle trade we stopped running.
+OWNED = ROOT / "state" / "roundtrip_owned.json"
 
 TICK = 0.0005
+SELL_FEE_BPS = 7.83      # measured maker sell fee, bps of notional
+MIN_RT_EDGE = 0.0010     # minimum profit per share above cost+fee
 # A leg priced near 0 or 1 has almost no spread in face terms and settles
 # asymmetrically; stay in the middle where the spread is real.
 MIN_PX, MAX_PX = 0.05, 0.95
@@ -92,6 +98,34 @@ def post(body: dict, tries: int = 6):
             pass
         time.sleep(1.5 * (k + 1))
     return None
+
+
+def cost_basis() -> dict[str, float]:
+    """Average price PAID per outcome leg, from our own fills.
+
+    The offer price MUST clear this. Measured 2026-09-22: without it the maker
+    posted at ask-tick regardless of cost and sold below what it paid —
+    #43050 bought 45 @ 0.55460 and sold 45 @ 0.54140 (-132 bps), #41700 bought
+    at 0.85388 and sold at 0.73094 (-1229 bps). It was dutifully booking losses
+    and calling them round trips.
+    """
+    fills = post({"type": "userFillsByTime", "user": MASTER,
+                  "startTime": 0}) or []
+    agg: dict[str, list[float]] = {}
+    for f in fills:
+        c = f.get("coin", "")
+        if not c.startswith("#") or f.get("dir") == "Settlement":
+            continue
+        sz, px = float(f["sz"]), float(f["px"])
+        signed = sz if f["dir"] == "Buy" else -sz
+        a = agg.setdefault("+" + c.lstrip("#"), [0.0, 0.0])
+        if signed > 0:                      # buys move the average
+            a[0] += sz
+            a[1] += sz * px
+        else:                               # sells reduce size at the average
+            a[0] = max(0.0, a[0] - sz)
+            a[1] = a[0] * (a[1] / (a[0] + sz)) if a[0] + sz else 0.0
+    return {k: (v[1] / v[0]) for k, v in agg.items() if v[0] > 0}
 
 
 def traded_24h(oid: int) -> tuple[float, int]:
@@ -138,6 +172,7 @@ def main() -> int:
         print("score feed unreachable — refusing to quote (fail safe)")
         return 2
 
+    basis = cost_basis()
     sp = post({"type": "spotClearinghouseState", "user": MASTER}) or {}
     held = {b["coin"]: float(b["total"]) for b in sp.get("balances", [])
             if b["coin"].startswith("+") and float(b["total"]) > 0}
@@ -212,7 +247,18 @@ def main() -> int:
         # settling (13.27). Offer everything we hold, one tick inside the ask.
         if inv_sz >= 1 and not has_sell:
             px = round(s["ask"] - TICK, 5)
-            if px > s["bid"]:
+            # NEVER OFFER BELOW COST. Selling under our own basis is not a round
+            # trip, it is realising a loss with extra steps. Require the sell
+            # fee (7.83 bps of notional) plus a minimum edge on top.
+            paid = basis.get(f"+{s['oid']}0")
+            if paid is not None:
+                floor = round(paid * (1 + SELL_FEE_BPS / 10_000) + MIN_RT_EDGE, 5)
+                if px < floor:
+                    log.info("HOLD %s %d — ask %.5f below cost floor %.5f "
+                             "(paid %.5f); waiting rather than selling at a loss",
+                             coin, int(inv_sz), px, floor, paid)
+                    px = None
+            if px is not None and px > s["bid"]:
                 r = ex.order(coin, False, float(int(inv_sz)), px,
                              order_type={"limit": {"tif": "Alo"}}, reduce_only=False,
                              builder={"b": BUILDER, "f": 0})
@@ -242,6 +288,13 @@ def main() -> int:
                     free -= sz * px
                     log.info("BID %s %d @ %.5f", coin, sz, px)
                 time.sleep(0.4)
+
+    # Publish ownership BEFORE reporting, so the minder never races a fill on a
+    # surface it has not yet been told about.
+    import json as _json
+    OWNED.parent.mkdir(parents=True, exist_ok=True)
+    OWNED.write_text(_json.dumps({"ts": time.time(),
+                                  "outcomes": sorted({s["oid"] for s in plan})}))
 
     print(f"\nplaced {placed} orders across {len(plan)} surfaces; free ${free:.2f}")
     print("maker share of fills is the number to watch — target >=90%, we ran 50%")

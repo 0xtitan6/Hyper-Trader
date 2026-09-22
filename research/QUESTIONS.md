@@ -46,7 +46,7 @@ results land), and make the guard distinguish the template rather than guessing
 from a team name. This is the FOURTH distinct guard hole — after competition-
 keyed NFL, the England/New-England collision, and unresolvable UFC.
 
-### 5. Why does equity not reconcile against fills? ($75 unexplained)
+### 5. RESOLVED — equity did not reconcile because the tracker double-counted
 
 `scripts/equity_snapshot.py` computes equity as
 `spot USDC + outcome legs + perp(all dexes) + HLP`. Measured 2026-09-21 over a
@@ -83,6 +83,15 @@ and tells the operator to trust the flow figure.
 ---
 
 ## ANSWERED
+
+- **LP reward attribution** — DEAD, closed 2026-09-22. Four consecutive zero
+  epochs, the last with front-of-book quoting, a full 24h window, 94% maker
+  share and 57 real fills. Every size/position excuse eliminated. `MEASURED.md`.
+- **Equity reconciliation ($75 gap)** — RESOLVED. Not missing money: summing
+  spot + legs + perp + vault double-counted, because perp `accountValue` is
+  reported against the same unified USDC that spot reports. Now uses
+  `portfolio.accountValue`, verified against a known transfer and a known vault
+  deposit. True P&L was -$28.72, not +$96.
 
 - **Paired outcome quoting** — NO EDGE as built; one configuration UNPROVEN.
   YES and NO are **one book** (807/807 prints sum to exactly 1.000000), so

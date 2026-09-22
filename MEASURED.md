@@ -126,7 +126,33 @@ to the TIGHT books (the Rams moneyline did $44,616/1,192 trades at a 0.00%
 paired edge) rather than the wide ones we can actually profit from. 75% is the
 ceiling on the opportunity, not our share of it.
 
-### LP rewards — attribution UNPROVEN (2026-09-18 .. 09-20)
+### LP rewards — DEAD. Four consecutive zero epochs (2026-09-18 .. 09-21)
+
+**CLOSED 2026-09-22. Do not build on this.** The final epoch was the clean test
+and it removed every remaining excuse:
+
+| epoch | our state | reward |
+|---|---|---|
+| 20260918 | quoting, behind the touch | $0.00 |
+| 20260919 | quoting, behind the touch | $0.00 |
+| 20260920 | quoting 2.2h of the window | $0.00 |
+| **20260921** | **front of book, full 24h, 94% maker, real fills** | **$0.00** |
+
+The earlier zeros were explicable — we sat one tick behind the touch with
+$384-$795 of queue ahead, so the 50% maker-fill and 10% taker-fill pools were
+unreachable by construction and only the 40% quoting pool applied. 20260921
+fixed that: we were the best bid, we took 57 fills at 86-94% maker, and the
+root still paid nothing.
+
+The system processes us — `root_updated_at` advances every epoch and the claim
+route extends — it simply returns nothing. There is no scoring endpoint to
+inspect (16 paths probed, only claims/proofs exist).
+
+**Consequence: the strategy must stand on spread alone.** It currently does not
+(-$2.48 realised + unrealised over 18h). Any plan whose economics depend on
+reward income is dead on arrival.
+
+### LP rewards — original attribution notes (2026-09-18 .. 09-20)
 $200k/month pool, daily UTC epochs, merkle root ~00:15Z, claim-based, route
 expires ~7d (unclaimed rewards are lost). Two full epochs qualified on every
 documented dimension and paid **$0**.
@@ -213,6 +239,95 @@ Kept the `hedge_decision` function anyway: it crosses when already profitable,
 enforces a T-4h deadline, ages positions out, and fixed the bug that left our
 own bid resting on the leg just hedged (202 shares from naked). Those are
 correctness wins independent of the passive question.
+
+### Paired quoting: YES and NO are ONE book (2026-09-21, n=807 prints)
+Every trade prints on **both** legs at prices summing to exactly 1.000000 —
+min = max = 1.000000 over 807 matched prints. Live books agree: `askNO == 1-bidYES`
+on **142/142** legs, mid sum = 1.00000 exactly.
+
+So "resting bids on both legs" is **not** a paired trade, it is a two-sided quote
+in a single instrument. Three consequences:
+
+- Our NO bid at `bidN+tick` *is* an offer on YES at `askY-tick`.
+- "Both legs fill" is not two independent events; it is the price round-tripping
+  our spread. It cannot be modelled as two fill probabilities multiplied.
+- **Crossing for the complement is not a hedge, it is flattening.** Cost is one
+  tick by construction: `(bidY+tick) + askN - 1 = tick`. Measured on 142/142 legs
+  with ZERO dispersion (p10 = p90 = +0.050%).
+
+### Fees are charged on EXIT, not entry (2026-09-21, n=42,251 fills, $1.73M)
+Public fills of 10 pure outcome-market addresses. **This supersedes the
+"maker 0.00 / taker 8.97 / settlement 13.4" entry above.**
+
+| action | n | notional | fee |
+|---|---|---|---|
+| **Buy, taker** | 10,243 | $478,616 | **0.00 bps** |
+| **Buy, maker** | 11,272 | $376,587 | **0.00 bps** |
+| Sell, maker | 10,069 | $418,392 | 7.83 bps |
+| Sell, taker | 10,105 | $202,543 | 13.73 bps |
+| Settlement | 340 | $223,947 | 13.27 bps |
+| Merge Outcome | 222 | $28,682 | 14.00 bps |
+
+Entry is free, every exit is charged. Our own last two taker BUYS (the Giants and
+Croatia minder hedges) were billed **$0.00**.
+
+- **The -0.80% on Giants/Croatia was NOT fees, it was drift.** Crossing was free;
+  the 6 minutes between maker fill and hedge cost 105.6 bps and 21.2 bps. We paid
+  for the minder's LATENCY, not its policy.
+- **Settlement (13.27 bps of face) is the EXPENSIVE exit.** Selling the leg back as
+  a maker is 7.83 bps of notional = 3.9 bps of face at px 0.50 — **3.4x cheaper.**
+- Caveat: our Aug taker buys were charged ~10 bps. Schedule changed or varies by
+  `deployerFeeScale`. Re-measure before relying on buy-free.
+
+### The people running our strategy lose money (2026-09-21, n=17,057 fills, $420k)
+Makers identified from the WS tape `users:[buyer,seller]` field — no tid matching,
+so no 429 storm. Convention verified against 1,210 tape trades matched to known
+fills: role and side correct 1210/1210.
+
+Eight near-identical wallets (2,125-2,375 fills, $51-59k, ~1.3d, 48-50% maker,
+100% outcome markets) trading **with each other on 27.3% of tape trades** — a
+reward-farming cluster running exactly our strategy:
+
+| | |
+|---|---|
+| gross of fees | **-0.43 bps** |
+| fees | 4.88 bps |
+| **net** | **-5.31 bps of notional** |
+| profitable | 1/8 |
+
+At 50% maker / 50% taker their gross is ~zero: they earn the half-spread passively
+and pay it back aggressively. **The entire loss is the fee on the taking half.**
+Across all 10 makers with closed books: 1/9 profitable, median -6.0 bps, t = -2.10.
+
+The one big winner (+$29,881 on $1.09M) is NOT a quoter — 58% taker, PnL is
+-$230,036 on trades +$223,649 at settlement +$25,037 on merges over 277 markets.
+A directional forecaster holding to resolution. (Checked for the trap: zero
+net-short legs, history starts inside the window — not 30d truncation.)
+
+### Paired quoting: the configuration table (2026-09-21)
+Median book spread 29.5 bps of face (n=142 legs); median paired edge after a
+one-tick improvement each side +19.5 bps. Markout on passive fills is POSITIVE
+(median +1.98 bps at 5s, +7.73 at 60s, n=1,012, third-party flow only) — passive
+fills are not catastrophically adversely selected.
+
+| configuration | bps of face | verdict |
+|---|---|---|
+| both sides passive, hold to settlement | **+6.2** | thin |
+| one side fills, cross instantly, settle | **-18.3** | **negative by construction** |
+| one side fills, cross after 6 min (observed) | **-76** (n=2) | what we did |
+| passive round-trip, sell leg back, never settle | **+15.6** | best case |
+| same, charged the measured 60s markout | **+3.8** | realistic |
+
+Breakeven passive-fill share for the settle path with instant crossing:
+p* = **74.7%**. At the drift we realised, p* = **92.5%**. We ran ~50% maker.
+
+**Verdict: NO EDGE in the cross-to-complete configuration we built.** The one
+configuration not falsified is 100% passive single-leg round-tripping (never cross,
+never settle) — **UNPROVEN**, because turnover at our size is unmeasured. At our
+only observed fill rate (2 passive fills / 4h, $50 legs) it is $0.46-1.87/day =
+6-24% APR, which merely brackets HLP (3.55%) and HYPE carry (13.63%).
+
+Full workings: `research/paired-outcome-quoting-2026-09-21.md`.
 
 ### Measured dead ends — do not re-research
 - **YES+NO complement arb**: closed. Min sum 1.00001 across 213 outcomes.
