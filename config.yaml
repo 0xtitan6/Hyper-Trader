@@ -189,7 +189,20 @@ discovery:
     # real loss tail) — genuinely diversified, which also hedges 0x9551e7d4's
     # single-coin xyz:SKHX concentration. Rotation-protection pin at its
     # EXISTING auto-weight: zero per-copy size change.
-    - "0x511e60d32a1fdcafb46bae7f43cfab0a87040713"
+    # 2026-09-22 DE-LISTED (Quorra, on strategist evidence). Every copy-PnL
+    # number this leader was judged on counted flow the engine REFUSES to trade.
+    # risk.allowed_market_types is [perp]; mirror.py:324/:634 silently drop
+    # outcome (#/+) and spot (@) fills — 79 intent_skipped reason=market_type in
+    # a 3.2-day journal window, 65 of them from this wallet.
+    #
+    # Re-scored perp-only (30d, $800 cap, 5bps slip): +$107.08 all-markets ->
+    # -$26.17 reachable, -$39.86 excluding its best coin. Three independent
+    # legs: perp_frac 0.368 is below our OWN configured 0.50 minimum (it only
+    # survived because leaders.py:241 bypasses screening for pinned wallets),
+    # 72% maker on perps, and negative reachable PnL. This is not drawdown
+    # churn — it retires the sharpe/maxDD re-bump bar, which was itself scored
+    # on unreachable flow.
+    # - "0x511e60d32a1fdcafb46bae7f43cfab0a87040713"
     # rank 42 — SOL perp specialist. DROPPED 2026-07-20: 30d backtest = 0 trades
     # (dead slot). Freed for auto-discovery; re-add only on positive evidence.
     # - "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8"
@@ -679,7 +692,13 @@ discovery:
     # equity over 19 positions = not averaging down, not a closedPnl illusion.
     # Re-bump condition UNCHANGED: sharpe >=0.2 AND maxDD <0.3x net in the
     # SAME window. If the next window clears both, bump 1.10 -> 1.50.
-    "0x511e60d32a1fdcafb46bae7f43cfab0a87040713": 1.10
+    # 2026-09-22 DE-LISTED — weight override removed with the pin. The re-bump
+    # condition above (sharpe >=0.2 AND maxDD <0.3x net) is RETIRED, not merely
+    # unmet: it was scored on all-markets PnL, and this wallet's edge is in
+    # outcome/spot flow that risk.allowed_market_types [perp] refuses. Perp-only
+    # it is -$26.17/30d. Do not re-add on a sharpe reading that has not been
+    # recomputed with --markets perp.
+    # "0x511e60d32a1fdcafb46bae7f43cfab0a87040713": 1.10
     # 2026-09-01 AUTO-DISCOVERED leader, NOT pinned. Explicit weight override to
     # cut its auto-Sharpe weight 1.32 -> 0.85 (-0.47, within the +/-0.5/run bound).
     # It has been trading LIVE since ~08-31 on zero backtest evidence, because
@@ -898,7 +917,7 @@ risk:
   # PR #30 auto-close: validated 2026-05-21 — WLD orphan correctly detected,
   # detection logic + closing path both work. Switching from alert-only to
   # autonomous close so we don't need operator hand-holding on each event.
-  leader_exit_auto_close: true
+  leader_exit_auto_close: false   # RESTORE 2026-09-19: disabled for cold boot (empty state DB); KILL does not gate this path
   leader_exit_debounce_cycles: 2
   # Manual positions opened outside the bot. LeaderReconciler skips these so
   # operator-managed trades don't get flagged as orphans + auto-closed.

@@ -1,0 +1,476 @@
+# MEASURED.md — what we have actually measured, with the numbers
+
+Append-only ledger of **market** findings. `INVARIANTS.md` is the sibling for
+**code** rules. Both exist for the same reason: something cost us money, and
+without writing the number down we paid for it again.
+
+**Read this before proposing a strategy.** Most ideas that sound new have
+already been measured here and killed. A measured negative is a result — it is
+cheaper than rediscovering it with capital.
+
+**Rules for entries.** Every claim carries a date, a sample size, and a verdict.
+No entry without a number. If a later measurement contradicts an entry, do not
+delete it — append the correction underneath, because the fact that we believed
+the old number is itself a finding.
+
+---
+
+## THE RECURRING TRAP — read this one twice
+
+> **A wide spread, or deep resting size, on something nobody is trading (or that
+> we cannot observe) is danger money, not opportunity.**
+
+This has now presented four times in four different costumes. Each time it
+looked like a fresh discovery. Each time the book was wide or deep *because*
+nothing was happening, or because whoever was there knew more than us.
+
+| date | costume | what it looked like | what it was |
+|---|---|---|---|
+| 2026-09-19 | in-play football | 6.68% paired edge | someone watching the match; **−$47** |
+| 2026-09-19 | empty outcome books | infinite `pool/depth` reward score | 0.00x multiplier on $180 deployed |
+| 2026-09-20 | weekend index binaries | uniform 9.80% across every strike | US markets shut; a Monday gap being priced |
+| 2026-09-20 | deep zero-flow books | $330–358 depth at a clean 1.15% | **$0 volume, 0 fills, ever** |
+
+**The test that catches all four:** never rank a surface by spread or depth.
+Rank by *realised flow* — did anyone actually trade this, in the last 24h, at
+all? Then confirm we can observe the underlying faster than the book moves.
+
+Encoded in `scripts/run_pair_maker.py::scan` (`traded_24h`, `--min-vol`,
+`--min-trades`) with regression tests. It is not a tuning knob.
+
+---
+
+## HIP-4 outcome markets
+
+### Fees (2026-09-20, n=17 fills, $394 notional)
+| role | n | notional | fee |
+|---|---|---|---|
+| maker (post-only) | 7 | $137 | **0.00 bps** |
+| taker | 10 | $257 | **8.97 bps** |
+| settlement | — | $265 | **13.4 bps** |
+
+Maker fills are genuinely free. **Takers and settlement are not** — an earlier
+claim of "zero HIP-4 fees" was true only for makers and wrong in general. This
+matters: the minder hedges one-sided fills with IOC (taker), so every hedge
+costs ~9bps and every completed basket ~13bps to settle. On a 1.15% edge that
+is roughly a fifth of it.
+
+### The paired trade is queue priority, not inefficiency (2026-09-20)
+Seven soccer surfaces quoted **identically**: 1000 shares a side, exactly
+0.0115 wide, from market creation. One market maker running a fixed policy.
+
+Our "1.15% edge" **is that maker's spread**. We rest one tick inside on both
+legs and win the fill only because we have price priority. There is no
+mispricing being captured. Size the expectation accordingly.
+
+### Profit requires equal SHARES at prices summing below 1.00
+Equal *dollars* on both sides is not a hedge — it overweights the cheap leg and
+is a directional bet. At 60/40 with $20 a side: 33 YES + 50 NO, which loses $7
+if YES wins and makes $10 if NO wins.
+
+```
+profit = shares x (1 - YES_price - NO_price)
+```
+Buying a complete set at 1.00 earns exactly zero, whoever wins.
+
+### Deep symmetric bids do not work (2026-09-20, n=70 markets, rolling windows)
+| window | bid | edge | both fill | one-sided | EV/cycle |
+|---|---|---|---|---|---|
+| 24h | 0.45 | 10% | 3% | 95% | **−0.87%** |
+| 48h | 0.45 | 10% | 5% | 94% | **−0.66%** |
+| 120h | 0.40 | 20% | 5% | 91% | **−0.03%** |
+
+YES and NO sum to ~1.00, so when YES falls to your bid, NO rises *away* from
+it. Both legs only fill if price round-trips the whole band, which inside a day
+essentially never happens. At 0.50/0.50 it is worst of all: you pay 1.00 for a
+1.00 basket — all of the one-sided risk, **zero** edge.
+
+Naive 14-day windows showed 27% both-fill and looked promising. That was the
+window flattering it. Always bound a fill-rate measurement to the actual
+holding period.
+
+### Where the flow is (2026-09-20, NFL, n=28 surfaces)
+| | median depth | median 24h vol | trades |
+|---|---|---|---|
+| in play (we refuse) | $382 | $2,155 | 15 |
+| pre-game (quotable) | $40 | $72 | 3 |
+
+**89% of all NFL flow is in-play.** The liquidity and the adverse selection are
+the same place. Making money there needs a sub-second scoreboard edge against
+people who do it professionally. We do not have one.
+
+Soccer internationals are the opposite — pre-match, real flow, nothing
+happening yet: England $13.0k/314 trades, Croatia $13.1k/316, Spain $12.9k/322.
+Kosovo, Greece, Serbia, Ireland: **$0 / 0 trades** despite the deepest books.
+
+### What the 3h kickoff buffer costs (2026-09-21, n=19 NFL markets)
+Pre-kickoff hourly volume, summed across every NFL market that kicked off that day:
+
+| window | volume | share |
+|---|---|---|
+| T-24 .. T-4 | $287,288 | 75% |
+| **final 3h (T-3..T-0)** | **$96,098** | **25%** |
+| of which T-0 alone | $44,508 | 12% |
+
+**The buffer excludes the busiest window**, and the single heaviest hour is the
+one containing kickoff.
+
+Keep it anyway. That flow spikes because information is arriving — NFL inactives
+and injury reports land ~90 minutes before kickoff — so the late book is dense
+with people who know who is playing. It is the Tottenham trade with a press
+release instead of a goal. Quoting T-24..T-3 captures 75% of the window with
+none of that asymmetry.
+
+Caveat on the 75%: this is aggregated over all markets, and most late flow goes
+to the TIGHT books (the Rams moneyline did $44,616/1,192 trades at a 0.00%
+paired edge) rather than the wide ones we can actually profit from. 75% is the
+ceiling on the opportunity, not our share of it.
+
+### LP rewards — DEAD. Four consecutive zero epochs (2026-09-18 .. 09-21)
+
+**CLOSED 2026-09-22. Do not build on this.** The final epoch was the clean test
+and it removed every remaining excuse:
+
+| epoch | our state | reward |
+|---|---|---|
+| 20260918 | quoting, behind the touch | $0.00 |
+| 20260919 | quoting, behind the touch | $0.00 |
+| 20260920 | quoting 2.2h of the window | $0.00 |
+| **20260921** | **front of book, full 24h, 94% maker, real fills** | **$0.00** |
+
+The earlier zeros were explicable — we sat one tick behind the touch with
+$384-$795 of queue ahead, so the 50% maker-fill and 10% taker-fill pools were
+unreachable by construction and only the 40% quoting pool applied. 20260921
+fixed that: we were the best bid, we took 57 fills at 86-94% maker, and the
+root still paid nothing.
+
+The system processes us — `root_updated_at` advances every epoch and the claim
+route extends — it simply returns nothing. There is no scoring endpoint to
+inspect (16 paths probed, only claims/proofs exist).
+
+**Consequence: the strategy must stand on spread alone.** It currently does not
+(-$2.48 realised + unrealised over 18h). Any plan whose economics depend on
+reward income is dead on arrival.
+
+### LP rewards — original attribution notes (2026-09-18 .. 09-20)
+$200k/month pool, daily UTC epochs, merkle root ~00:15Z, claim-based, route
+expires ~7d (unclaimed rewards are lost). Two full epochs qualified on every
+documented dimension and paid **$0**.
+
+Cause unresolved. Leading hypothesis is size, not breakage: our maker footprint
+was **$137 for part of one day** against ~$4,169/leg of competing depth, which
+rounds to nothing. Open test: three surfaces resting six days from kickoff so
+quotes survive a complete scoring window. Read at 00:22Z.
+
+Builder code `0xab5dbc…b704` is attached and accepted; `maxBuilderFee` returns
+1000. No `approveBuilderFee` needed at fee 0.
+
+**No scoring endpoint exists** (probed 16 paths 2026-09-21). Monarch serves only
+`/marina/claims/rewards` and `/marina/claims/proofs`; every other route returns
+an AWS "Missing Authentication Token", i.e. no such route. There is no
+leaderboard, no per-address score, no threshold field — so there is nothing more
+to read, by API or by browsing the dashboard. Do not re-probe.
+
+The response does confirm the system PROCESSES us: `root_updated_at` advances
+each epoch and the claim route extends. It computes our entry and returns
+nothing, rather than erroring or ignoring the address.
+
+**Leading hypothesis after 3 zero epochs:** the pools are 40% quoting / 50%
+maker-fill / 10% taker-fill. We were quoting one tick BEHIND the touch with
+$384-$795 of queue ahead of us (see the queue-position bug), so we could earn
+presence but were structurally unable to take a single maker fill — **60% of the
+pool was unreachable by construction.** Fixed 2026-09-21; first epoch quoting at
+the front of the book is the real test.
+
+### FIRST REAL FILLS — and they lost money (2026-09-21, n=2 pairs)
+After fixing the queue-position bug, the first maker fills arrived within 4h:
+
+| time | role | leg | price |
+|---|---|---|---|
+| 06:01:30 | **MAKER** | Giants NO | 0.72818 |
+| 06:07:37 | taker | Giants YES | 0.28238 (minder hedge) |
+| 06:41:57 | **MAKER** | Croatia NO | 0.57422 |
+| 06:42:36 | taker | Croatia YES | 0.42790 (minder hedge) |
+
+The machinery worked: one leg filled, the minder detected the one-sided position
+and completed the basket within 6 minutes, no naked overnight exposure.
+
+**But both baskets completed ABOVE par:**
+```
+Giants   0.72818 + 0.28238 = 1.01056  x 80 -> redeems $80   = -$0.84
+Croatia  0.57422 + 0.42790 = 1.00212  x151 -> redeems $151  = -$0.32
+                                                     total   -$1.16
+```
+A quoted edge of +1.25% realised as **-0.8%**. This is adverse selection, stated
+precisely: *the leg that fills is the leg the market is moving away from*. By
+the time we crossed for the other leg it had repriced, and the hedge cost more
+than the edge.
+
+n=2. Not conclusive, but it is the first real evidence about the economics
+rather than the mechanics, and the sign is negative. The open question is
+whether `MAX_PAIR_COST = 1.02` should tighten: hedging above par locks a small
+loss, but NOT hedging leaves a coin flip on a binary, which is worse variance
+for the same expected value.
+
+### Passive hedging does NOT beat crossing (2026-09-21, n=2,307 paths)
+Proposed fix for the -0.8% realised edge: when a leg fills, rest a bid at a
+price that still clears profit instead of crossing the spread. Backtested on 34
+markets, 14d of hourly candles, 24h horizon.
+
+| | |
+|---|---|
+| passive hedge fills within 24h | **49.6%**, at +0.50% each |
+| of the 50.4% unfilled, waiting IMPROVED the cross | **29%** (71% got worse) |
+| EV cross immediately | **-0.78%** |
+| EV passive-then-deadline | **-0.93%** |
+
+**The fix is worse.** A first pass showed +0.25% by scoring unfilled hedges as
+zero; once the 50% that must cross at the deadline are counted honestly, the
+advantage inverts. Waiting does not help because the market keeps moving in the
+direction that filled us — adverse selection is indifferent to when we cross.
+
+**Caveat, stated because it weakens the conclusion:** historical books are not
+available, so the complement's ask was synthesised as `close x 1.01`. The FILL
+RATE is measured (real candle lows); the EV comparison leans on an assumed
+spread and is weak evidence. Neither mode is proven — but nothing supports
+shipping passive as an improvement.
+
+Kept the `hedge_decision` function anyway: it crosses when already profitable,
+enforces a T-4h deadline, ages positions out, and fixed the bug that left our
+own bid resting on the leg just hedged (202 shares from naked). Those are
+correctness wins independent of the passive question.
+
+### Paired quoting: YES and NO are ONE book (2026-09-21, n=807 prints)
+Every trade prints on **both** legs at prices summing to exactly 1.000000 —
+min = max = 1.000000 over 807 matched prints. Live books agree: `askNO == 1-bidYES`
+on **142/142** legs, mid sum = 1.00000 exactly.
+
+So "resting bids on both legs" is **not** a paired trade, it is a two-sided quote
+in a single instrument. Three consequences:
+
+- Our NO bid at `bidN+tick` *is* an offer on YES at `askY-tick`.
+- "Both legs fill" is not two independent events; it is the price round-tripping
+  our spread. It cannot be modelled as two fill probabilities multiplied.
+- **Crossing for the complement is not a hedge, it is flattening.** Cost is one
+  tick by construction: `(bidY+tick) + askN - 1 = tick`. Measured on 142/142 legs
+  with ZERO dispersion (p10 = p90 = +0.050%).
+
+### Fees are charged on EXIT, not entry (2026-09-21, n=42,251 fills, $1.73M)
+Public fills of 10 pure outcome-market addresses. **This supersedes the
+"maker 0.00 / taker 8.97 / settlement 13.4" entry above.**
+
+| action | n | notional | fee |
+|---|---|---|---|
+| **Buy, taker** | 10,243 | $478,616 | **0.00 bps** |
+| **Buy, maker** | 11,272 | $376,587 | **0.00 bps** |
+| Sell, maker | 10,069 | $418,392 | 7.83 bps |
+| Sell, taker | 10,105 | $202,543 | 13.73 bps |
+| Settlement | 340 | $223,947 | 13.27 bps |
+| Merge Outcome | 222 | $28,682 | 14.00 bps |
+
+Entry is free, every exit is charged. Our own last two taker BUYS (the Giants and
+Croatia minder hedges) were billed **$0.00**.
+
+- **The -0.80% on Giants/Croatia was NOT fees, it was drift.** Crossing was free;
+  the 6 minutes between maker fill and hedge cost 105.6 bps and 21.2 bps. We paid
+  for the minder's LATENCY, not its policy.
+- **Settlement (13.27 bps of face) is the EXPENSIVE exit.** Selling the leg back as
+  a maker is 7.83 bps of notional = 3.9 bps of face at px 0.50 — **3.4x cheaper.**
+- Caveat: our Aug taker buys were charged ~10 bps. Schedule changed or varies by
+  `deployerFeeScale`. Re-measure before relying on buy-free.
+
+### The people running our strategy lose money (2026-09-21, n=17,057 fills, $420k)
+Makers identified from the WS tape `users:[buyer,seller]` field — no tid matching,
+so no 429 storm. Convention verified against 1,210 tape trades matched to known
+fills: role and side correct 1210/1210.
+
+Eight near-identical wallets (2,125-2,375 fills, $51-59k, ~1.3d, 48-50% maker,
+100% outcome markets) trading **with each other on 27.3% of tape trades** — a
+reward-farming cluster running exactly our strategy:
+
+| | |
+|---|---|
+| gross of fees | **-0.43 bps** |
+| fees | 4.88 bps |
+| **net** | **-5.31 bps of notional** |
+| profitable | 1/8 |
+
+At 50% maker / 50% taker their gross is ~zero: they earn the half-spread passively
+and pay it back aggressively. **The entire loss is the fee on the taking half.**
+Across all 10 makers with closed books: 1/9 profitable, median -6.0 bps, t = -2.10.
+
+The one big winner (+$29,881 on $1.09M) is NOT a quoter — 58% taker, PnL is
+-$230,036 on trades +$223,649 at settlement +$25,037 on merges over 277 markets.
+A directional forecaster holding to resolution. (Checked for the trap: zero
+net-short legs, history starts inside the window — not 30d truncation.)
+
+### Paired quoting: the configuration table (2026-09-21)
+Median book spread 29.5 bps of face (n=142 legs); median paired edge after a
+one-tick improvement each side +19.5 bps. Markout on passive fills is POSITIVE
+(median +1.98 bps at 5s, +7.73 at 60s, n=1,012, third-party flow only) — passive
+fills are not catastrophically adversely selected.
+
+| configuration | bps of face | verdict |
+|---|---|---|
+| both sides passive, hold to settlement | **+6.2** | thin |
+| one side fills, cross instantly, settle | **-18.3** | **negative by construction** |
+| one side fills, cross after 6 min (observed) | **-76** (n=2) | what we did |
+| passive round-trip, sell leg back, never settle | **+15.6** | best case |
+| same, charged the measured 60s markout | **+3.8** | realistic |
+
+Breakeven passive-fill share for the settle path with instant crossing:
+p* = **74.7%**. At the drift we realised, p* = **92.5%**. We ran ~50% maker.
+
+**Verdict: NO EDGE in the cross-to-complete configuration we built.** The one
+configuration not falsified is 100% passive single-leg round-tripping (never cross,
+never settle) — **UNPROVEN**, because turnover at our size is unmeasured. At our
+only observed fill rate (2 passive fills / 4h, $50 legs) it is $0.46-1.87/day =
+6-24% APR, which merely brackets HLP (3.55%) and HYPE carry (13.63%).
+
+Full workings: `research/paired-outcome-quoting-2026-09-21.md`.
+
+### Measured dead ends — do not re-research
+- **YES+NO complement arb**: closed. Min sum 1.00001 across 213 outcomes.
+- **Favourite-longshot bias**: absent. Slope 1.034, p=0.74.
+- **Early entry**: no window exists. The MM quotes from creation; $1.24 total
+  pool in a market's first hour.
+- **Barrier/digital arb at realised vol**: breakeven 38.0% vs realised
+  32.9–39.7%. Not executable.
+
+### In-play market making is not available to us (2026-09-21, live NFL, 8 min)
+Sampled two live Chiefs/Colts books against our ESPN score feed every 6s:
+
+| | count |
+|---|---|
+| price moved, **no** score change | **22** |
+| score changed, **no** price move | 2 |
+| both inside the same 6s window | **0** |
+
+At t=344s the Colts kicked a field goal — our feed went 0-7 → 3-7 and the mid
+moved **0.5963 → 0.5963**, not one tick. It did not react because it had
+already reacted: over the preceding four minutes the mid ran 0.5750 → 0.6512 →
+0.5850 → 0.5963 while our feed sat blind at "0-7, clock 8:25".
+
+The book prices the *drive* — field position, down, distance, possession. Our
+feed carries score and clock only. By the time we learn a score changed, it is
+fully priced.
+
+**We are not slightly behind; we are a different speed class.** Quoting in-play
+is writing free options to people who can see the game. This is what the 6.68%
+in-play vs 0.17% pre-match spread was always paying for.
+
+Professional in-play MMs buy the edge rather than compute it: rights-holder
+feeds (Sportradar, Genius) arrive 3-8s before broadcast, at five to six figures
+a year. Play-by-play from ESPN would narrow the gap to those 3-8s — which is
+the entire window the game is played in. Not viable.
+
+---
+
+## Crypto one-touch barriers (HIP-4 `template:priceTouch`)
+
+2026-09-20. Liquid and 24/7, unlike sports: HYPE 1,871 trades/24h, BTC up to
+846. Underlying fully observable to us, so adverse selection is structurally
+lower than any sports market.
+
+| | implied vol | realised (14d) | read |
+|---|---|---|---|
+| BTC, all strikes | 36–61% | 33–35% | consistently **rich** |
+| HYPE $100 touch | 59–64% | 67–74% | **cheap** |
+
+The premium is real and persistent. **But we cannot short an outcome leg**, so
+selling it means buying NO — risking 0.971 to make 0.029 at the 95k strike.
+33:1 against. That is selling insurance without reserves. The one strike with
+survivable odds (85k) trades at 36% implied, *below* our 38% breakeven.
+
+HYPE is the correctly-shaped one: buy the touch at 0.503 against 0.538 fair,
++7%, loss capped at stake. Caveats: the edge is entirely a vol model, and we
+already hold 2.88 HYPE perp — it stacks exposure.
+
+### Market census — where the flow actually is (2026-09-21, n=201 markets)
+| category | mkts | traded | 24h vol | trades | vol/mkt |
+|---|---|---|---|---|---|
+| **crypto barrier** | 8 | 8 | **$888,708** | 10,808 | **$111,088** |
+| other sport | 46 | 37 | $815,746 | 11,620 | $17,734 |
+| NFL | 28 | 27 | $600,569 | 8,220 | $21,449 |
+| misc | 38 | 17 | $307,736 | 6,570 | $8,098 |
+| index binary (xyz) | 39 | 26 | $262,494 | 2,488 | $6,731 |
+| price binary | 38 | 13 | $23,470 | 232 | $618 |
+| MLB | 4 | 1 | $36 | 4 | $9 |
+
+$2.9M / 39,942 trades in 24h; only **129/201** markets have any flow at all.
+
+**Eight crypto barriers out-trade all 28 NFL markets combined**, at 5-6x the
+volume per market, 24/7, with the underlying fully observable to us.
+
+### …and why we cannot yet trade them (2026-09-21)
+The inverse of the soccer problem — huge flow, no depth:
+
+| oid | target | spread | top-of-book depth | 24h vol | trades |
+|---|---|---|---|---|---|
+| 1209 | HYPE $100 | 7.1% | **$5** | $202,434 | 3,562 |
+| 1213 | BTC $90k | 38.5% | $100 | $176,968 | 1,554 |
+| 1214 | BTC $85k | 4.4% | **$3** | $176,966 | 3,234 |
+
+3,562 trades against $5 of resting size. Nobody stands there because a barrier's
+fair value **moves continuously with the underlying** — unlike a sports line,
+which is static for days. Our requote loop runs every **20 minutes**; against a
+book repricing on every BTC tick that is a standing offer to be picked off, and
+the only fills we would get are the ones where BTC already moved against us.
+
+**Verdict: best surface on the venue, and we are not equipped for it.** Not a
+capital problem — a speed problem. Needs sub-minute repricing off the live mark
+plus perp delta hedging. That is a build, not a config change, and it is the
+most concrete thing on the roadmap.
+
+---
+
+## The copy engine
+
+n=964 bot-only closes over 4.5 months. Mean **+$0.0416**/trade, sd $5.23,
+**t = +0.25**. 95% CI on total **−$278 … +$358**. Proving the edge at 95% needs
+60,720 trades ≈ 23.6 years.
+
+Lifetime: −$225 gross / −$263 after fees on $107k notional. Fees are 0.035% of
+notional, so **it loses before fees** — cost reduction cannot save it. Of
++$117.64 perps-only, **+$96 was placed manually**, leaving +$21.56 attributable
+to the bot in four months.
+
+It holds ~$179 of collateral. Scaling it multiplies a coin flip: at $10k the
+same series gives +$627 with a CI of −$4,342 … +$5,597.
+
+---
+
+## Structural constraints — proposals violating these are dead on arrival
+
+1. **No HL fee tier pays a maker rebate at any volume.** The MM programme is
+   gated at ~0.5% of total exchange maker flow. Unreachable at any size we will
+   have. The 9bp taker round-trip is a permanent floor.
+2. **Minimum order value $10**; HIP-4 legs are **whole shares only** (a
+   fractional size returns `Order has invalid size`).
+3. **HIP-3 dexes hold separate collateral.** Never sum across them; cap per dex.
+4. **Spot is not perp collateral for hedging.** A delta-neutral spot/perp pair
+   costs ~1.5x notional.
+5. **Outcome legs are spot-like** — bid only, no shorting. Being "two-sided"
+   means holding both legs, or owning inventory before posting an ask.
+6. **Agent wallets cannot** approve builders, approve agents, or withdraw.
+7. **Portfolio margin needs >$10k** account value.
+
+## Passive benchmarks — anything active must beat these
+| | rate | note |
+|---|---|---|
+| HLP vault | 3.55% APR | 4-day lockup, $186M TVL |
+| BTC/ETH funding carry | 10.2–10.3% APR mean, 95% hours positive | n=500 hourly; needs active margin management |
+| HYPE funding carry | 13.63% APR | n=13,080 hourly, 92.2% positive, 18/18 30d windows |
+
+Carry is a real edge at the wrong size: constraint 4 caps deployable notional
+so ~$421 free earns ~$25/yr, which does not justify the liquidation risk of a
+short perp leg on a box with this uptime history.
+
+---
+
+## Open questions
+1. **Fill rate on paired quotes.** n=1 completed pair. Unknown, and it is the
+   entire strategy. Measuring now on England + Croatia.
+2. **Reward attribution** — size or breakage? Test resting, reads 00:22Z.
+3. Does the copy engine have a profitable *subset* (by surface/coin/hour)
+   dragged down by a removable one? Never run; the agent died first.

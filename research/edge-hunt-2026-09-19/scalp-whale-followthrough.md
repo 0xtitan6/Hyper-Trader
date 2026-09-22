@@ -154,3 +154,74 @@ SUI  spread 0.24bp  $1k 0.54  $10k 3.27  $50k BOOK OUT
 ```
 Size is NOT the binding constraint on majors ($10k costs <0.5bp). The 9bp fee is the whole
 problem: it is 75x the BTC spread and 20x the ETH spread.
+
+# TEST B — LIVE TAPE, TRUE AGGRESSOR TAG (the decisive test)
+
+Collectors: `ws_trades.py` (WS `{"type":"trades","coin":C}` -> coin/side/px/sz/exchange-ts,
+plus OUR local receive ts) and `ws_bbo.py` (WS `{"type":"bbo","coin":C}`), 10 coins:
+BTC ETH SOL HYPE DOGE XRP SUI LTC PUMP ASTER. 2026-09-19 ~02:45-03:30 UTC.
+Collected **28,682 trades over 43.8 min** and **25,987 BBO snapshots**.
+
+A "whale sweep" = consecutive same-coin same-side prints within 500ms aggregated (one
+aggressor order sweeping levels). 9,939 sweeps. Top 1% per coin and >= $20k:
+**90 events, median $268k, p90 $706k, max $4.40M.**
+
+**Entry price = mid taken 1000ms AFTER OUR OWN receive timestamp of the last print of the
+sweep.** This is the no-look-ahead entry: we cannot trade before we have seen the print.
+
+## Result (`wf_tape3.py` trade-derived mid | `wf_tape2.py` true BBO mid — two independent
+price constructions, they agree)
+```
+                    trade-mid (n=89-90)                    BBO mid (n=66-73)
+ impact already gone by entry  +3.56bp t=+8.24      |   +2.75bp t=+6.85
+ +  5s   +0.77bp t=+2.91 CI[+0.25,+1.30]            |   +0.91bp t=+2.47
+ + 15s   +1.72bp t=+3.22 CI[+0.67,+2.77]            |   +1.83bp t=+2.84
+ + 30s   +2.30bp t=+3.85 CI[+1.13,+3.47]            |   +1.70bp t=+2.36
+ + 60s   +3.11bp t=+2.97 CI[+1.06,+5.16]            |   +2.61bp t=+2.04
+ +120s   +1.39bp t=+1.15 CI[-0.99,+3.77]            |   -0.69bp t=-0.53
+ +300s   +0.31bp t=+0.21                            |   -0.44bp t=-0.24
+ +600s   +1.29bp t=+0.57                            |   -0.41bp t=-0.17
+```
+Symmetric: buy-sweeps +2.54bp @60s (n=52), sell-sweeps +3.90bp @60s (n=38). So unlike the
+candle test this IS a genuine, two-sided microstructure effect — it is just far too small.
+
+## Size monotonicity (`wf_tape4.py`, BBO mids, all sweeps bucketed by notional)
+```
+ sweep size        +15s     +30s     +60s    +120s        n
+ $2k-$10k        +0.13    -0.08    -0.03    +0.10       911   <- nothing
+ $10k-$50k       +0.15    +0.30    +0.55    +0.93       509   <- nothing
+ $50k-$200k      +0.42    -0.36    -1.36    -2.28       127
+ $200k-$1M       +1.98    +2.36    +3.12    +0.25        58   <- t=+2.6/+2.8/+2.1
+ >$1M               --       --       --       --          5   (too few)
+ 95% CI upper bound for the $200k-$1M bucket at +60s = +6.10bp
+```
+
+# VERDICT
+
+**Follow-through is REAL and statistically significant, and it is ~1/3 of the size needed.**
+
+Best case measured: **+3.11bp** (60s hold after a $200k+ aggressive sweep), t=+2.97, n=90,
+95% CI [+1.06, +5.16]. **The bar is +9.00bp. The entire 95% CI sits below the bar.**
+Anything under $50k of sweep notional has zero signal (n=1,420, |mean| <= 0.9bp).
+
+Anatomy of why: a $268k sweep moves the mid about **6.7bp total**, and **3.56bp of that is
+already gone 1 second after we can see the print** (t=+8.24). We can only ever compete for
+the residual ~3bp, and we must pay 9bp to do it. The effect is also fully decayed by 120s,
+so there is no "hold longer to earn more" escape.
+
+Maker note (for completeness, and it does not rescue anything): maker round trip is 3.0bp,
+so +3.11bp @60s would be +0.11bp gross-of-nothing. You cannot reliably get a passive fill on
+the side the price is already moving toward — that queue is precisely where you are adversely
+selected — and GROUND_TRUTH rule 2 forbids maker-rebate dependence anyway. Stop.
+
+Capacity: irrelevant, because there is no edge. If there were, books support $50-100k clips
+on BTC/ETH/SOL/XRP at <0.5bp slippage.
+
+## What would falsify this verdict
+- A venue/fee path where round trip < 3bp (e.g. a builder-code fee rebate or a market-maker
+  tier). At 2bp round trip the $200k+ 60s signal nets ~+1.1bp/trade — still thin, and n=58.
+- Measuring at sub-second latency: the 3.56bp of pre-entry impact means most of the move
+  happens inside 1s. If we could act in <100ms the capturable share might be larger. That is
+  a colocation/HFT question and we are a Python bot on a shared EC2 box; not our game.
+- A much larger sweep bucket (>$1M) — only 5 events in 44 min, would need ~2 weeks of tape
+  to get n=100. The $200k-$1M point estimate (+3.12bp) would have to be ~3x larger there.

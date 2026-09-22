@@ -369,3 +369,72 @@ $226.75 proxy) change by no more than rounding when the window is unchanged;
 no fill appears twice by `tid`.
 
 </details>
+
+## Jev classifier for the in-play guard (proposed 2026-09-21)
+
+`src/gamestate.is_safe_to_quote` classifies market descriptions with keyword
+matching (`EVENT_TOKENS`, token-overlap on team names). It has returned a
+confidently wrong answer three times:
+
+| date | failure | consequence |
+|---|---|---|
+| 09-20 | `competition:`-keyed NFL waved through as "not an event market" | 8 live games quotable |
+| 09-20 | "England" token-matched "New England Patriots" | reported IN PLAY at 7-0 |
+| 09-20 | UFC 331 unresolvable, guard allowed it | both legs resting on finished fights |
+
+Each was a clean-looking wrong answer, not an error — the failure mode of a bad
+schema, not of a bad model.
+
+This fits the classifier band: bounded answer space
+(`quotable / in-play / unresolved`), unstructured text input, called on every
+market every cycle. `TYPESAFE_API_KEY` is already in the env.
+
+**Keep from the current design:** default to REFUSE when uncertain, and route
+below-threshold cases to refusal rather than to a guess. The guard's value is
+that it is wrong in the safe direction.
+
+**Do NOT extend this to the operator health check.** That path is already a
+zero-token shell script (`scripts/operator_tier1.sh`); its inputs are structured
+numbers and a threshold beats a classifier there. Adding a model would be a
+regression — see the 991k-tokens/day note in that file.
+
+Blocked on: nothing. Sized: half a day. Priority: below the barrier maker and
+below measuring fill rate, since the guard currently fails safe.
+
+## Oil outcome markets — does HIP-4 lag the oil price? (proposed 2026-09-21)
+
+Operator's idea: trade oil outcomes on Gulf/geopolitical flow. The tradeable
+version drops the news half and keeps the measurable half.
+
+`perp:xyz:CL` exists and trades (5.2% spread, 25 trades, $3,150 in 24h as of
+2026-09-21). Unlike sports, oil has a **continuously observable reference** —
+Brent/WTI print in real time and HL runs its own oil perp — so the question is
+testable rather than speculative:
+
+**Does the HIP-4 oil outcome market reprice BEFORE or AFTER the underlying?**
+
+Run the same experiment that closed in-play sports (see MEASURED.md): sample the
+outcome mid and the reference price together every few seconds and count which
+moves first. In-play NFL came back 22 price-moves-before-score to 2 after, which
+killed it. If oil comes back the other way, it is a real edge on a surface where
+we can actually see the input.
+
+Why the news angle is the weaker half: Reuters/Bloomberg latency is where
+professional desks spend millions and we would be seconds behind. But we may not
+need the news — if the oil PRICE moves first and the outcome market follows, the
+signal is free and public.
+
+Prerequisite: 25 trades/24h is thin. Check whether flow is real before building;
+depth is not flow (see the Kosovo/Greece finding).
+
+Blocked on: nothing. Sized: 1h to measure, then decide. Priority: after the
+fill-rate read, alongside the crypto-barrier maker — both are "observable
+underlying" plays and share the same repricing machinery.
+
+## 2026-09-22 — allowed_market_types is the binding constraint (strategist)
+`risk.allowed_market_types: ['perp']` silently drops the majority of our leaders'
+flow (79 `intent_skipped reason=market_type` in a 3.2d journal window). Perp-only
+copy PnL: 0x9551e7d4 +$10.82, 0x511e60d3 -$26.17, 0xa3f996f2 -$113.44 (30d, $800 cap,
+5bps slip). Decision needed from Quorra/Neil: (a) enable outcome/spot mirroring so the
+edge our leaders actually have becomes reachable, or (b) source perp-native leaders.
+Weight tuning cannot fix this. Evidence: state/strategist_verdict_2026-09-22-1217.md

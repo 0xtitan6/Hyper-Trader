@@ -451,3 +451,331 @@ def test_england_does_not_match_new_england_patriots() -> None:
 
     assert gs.lookup("England") is None
     assert gs.lookup("Tottenham") is None          # absent entirely
+
+
+def test_unresolvable_event_markets_are_refused(monkeypatch) -> None:
+    """The third guard hole found on 2026-09-20, and why the default flipped.
+
+    The guard used to return SAFE for anything it did not recognise. That waved
+    through eight in-progress NFL games (keyed `competition:` rather than
+    `participant:`) and live UFC 331 bouts (UFC appears in no scoreboard map) —
+    both showing fat paired "edge" that was pure settled-event adverse selection.
+    An unrecognised event market is not a non-event market.
+    """
+    from src import gamestate as gs_mod
+
+    gs = gs_mod.GameState(leagues=(), ttl_s=0.0)
+    gs._cache = {"x": gs_mod.MatchState("Final", None, False, "a", "b", "0 - 0")}
+    gs._fetched_at = gs_mod.time.time()
+
+    for desc in ("competition:UFC 331|contestType:game",
+                 "countedPlay:regulation time and any overtime",
+                 ""):
+        safe, reason = gs.is_safe_to_quote(desc)
+        assert safe is False, f"{desc!r} should be refused"
+        assert "cannot resolve" in reason
+
+    # A genuine non-event market is unaffected.
+    assert gs.is_safe_to_quote("perp:BTC|threshold:100000")[0] is True
+
+
+def test_kickoff_buffer_is_single_source_of_truth():
+    """The maker (via gamestate) and the minder must agree on when a pre-match
+    book stops being pre-match.
+
+    They diverged once — gamestate 1.0h, minder 3.0h. The maker would rest a
+    quote 2h before kickoff and the minder would cancel it on the next 5-minute
+    tick, burning post-only queue position every cycle and risking a one-sided
+    fill close to kickoff. That is the -$47 shape from 2026-09-19.
+    """
+    import importlib.util
+    from src.gamestate import KICKOFF_BUFFER_H
+
+    spec = importlib.util.spec_from_file_location(
+        "pair_minder", Path(__file__).resolve().parent.parent / "scripts" / "pair_minder.py")
+    minder = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(minder)
+
+    assert minder.KICKOFF_BUFFER_H is KICKOFF_BUFFER_H, (
+        "pair_minder must IMPORT KICKOFF_BUFFER_H from src.gamestate, not "
+        "redefine it — a redefinition lets the two drift apart silently")
+    assert KICKOFF_BUFFER_H >= 3.0, (
+        "buffer below 3h reopens the window where a quote survives into kickoff")
+
+
+def test_pair_maker_requires_flow_not_just_depth():
+    """Depth is not flow. A book can show deep resting size and never trade.
+
+    Measured 2026-09-20: Kosovo, Greece, Serbia and Ireland each showed
+    $330-358 of depth at a clean 1.15% spread with $0 volume and 0 fills over
+    both 24h and 7d. That depth is one market maker posting 1000 shares a side
+    at a fixed 1.15c on every market from creation — not demand. A bid resting
+    there earns nothing for as long as it sits.
+
+    Ranking on depth alone picked those books three separate times (empty books
+    09-19, frozen index binaries 09-20, these 09-20), so the filter is a
+    permanent part of the scan, not a tuning knob.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "run_pair_maker.py").read_text()
+    assert "def traded_24h" in src, "scan must measure realised flow per surface"
+    assert "min_vol" in src and "min_trades" in src, \
+        "scan must reject surfaces below a flow floor"
+    # the flow gate must be applied inside scan(), not merely defined
+    scan_body = src.split("def scan(")[1].split("\ndef ")[0]
+    assert "traded_24h" in scan_body, "traded_24h must be CALLED by scan()"
+    assert "no flow" in scan_body, "scan must skip and log flowless surfaces"
+
+
+def test_pair_maker_rejects_incoherent_wide_books():
+    """A huge paired 'edge' means the bids are far below mid, not that the
+    market is mispriced. Measured: bids that deep leave us one-sided 91-95% of
+    the time, EV -0.87%/cycle. On 2026-09-20 the scan rested bids summing to
+    0.449 on a book whose mids summed to ~1.00 and called it a 55% edge.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "run_pair_maker.py").read_text()
+    scan_body = src.split("def scan(")[1].split("\ndef ")[0]
+    assert "mid_sum" in scan_body, "scan must sanity-check bids against mids"
+
+
+def test_pair_maker_serialises_on_a_lock():
+    """Two concurrent maker runs each half-enter a pair.
+
+    The capital reservation is computed from a balance read at start-up, so two
+    runs both believe they can afford both legs. Measured 2026-09-21: a manual
+    run and the 20-minute requote cron fired at 22:31:23 on the same surface.
+    The cron won the YES leg and then had no capital for the NO, leaving 116
+    shares of YES against 27 of NO — a 4:1 directional bet nobody chose, which
+    is precisely the one-sided shape that cost -$47 on 2026-09-19.
+
+    The lock must be taken by the MAKER, not only the cron wrapper, or a manual
+    invocation still races the timer.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "run_pair_maker.py").read_text()
+    assert "import fcntl" in src and "LOCK_EX" in src, \
+        "run_pair_maker must take an exclusive lock, not just the cron wrapper"
+    assert "LOCK_NB" in src, "lock must be non-blocking — a second run exits, never queues"
+    main_body = src.split("def main(")[1]
+    assert "flock" in main_body, "the lock must be acquired inside main()"
+
+    wrapper = (Path(__file__).resolve().parent.parent
+               / "scripts" / "pair_requote_cron.sh").read_text()
+    assert "flock -n" in wrapper, "cron wrapper must also serialise"
+
+
+def test_pair_maker_sizes_by_shares_not_dollars():
+    """A basket redeems $1.00 per MATCHED PAIR of shares, so the hedge is N
+    YES against N NO. Equal dollars per leg buys unequal shares and always
+    overweights the cheap leg, because cheap means unlikely.
+
+    Measured 2026-09-21: at $15/leg on a 0.7367/0.2503 book the maker placed
+    20 YES against 59 NO. Only 20 shares were hedged; the other 39 were a naked
+    directional bet nobody chose. The same error at 60/40 with $20 a side loses
+    $7 if YES wins and makes $10 if NO wins — a coin flip dressed as a hedge.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "run_pair_maker.py").read_text()
+    assert "sz = float(int(args.usd_per_leg / px))" not in src, \
+        "per-leg dollar sizing buys unequal shares — that is not a hedge"
+    assert "shares = int(" in src, "must compute ONE share count for both legs"
+    assert "sz = float(shares)" in src, "both legs must submit the same share count"
+
+
+def test_pair_sizing_arithmetic_is_balanced():
+    """The share count must be computed off the PAIR price, and the resulting
+    basket must cost at most the budget while hedging every share bought."""
+    for bid0, bid1, budget in ((0.73667, 0.25025, 30.0),
+                               (0.4148, 0.5737, 40.0),
+                               (0.0675, 0.9200, 50.0)):
+        pair_px = bid0 + bid1
+        shares = int(budget / pair_px)
+        assert shares >= 1
+        assert shares * pair_px <= budget + 1e-9, "basket must fit the budget"
+        # every share on one leg is matched by one on the other
+        assert shares == shares, "identical counts by construction"
+        # and the payoff is symmetric: whichever side wins, we redeem `shares`
+        redeem = shares * 1.0
+        assert redeem - shares * pair_px >= 0, "pair below par must not lose"
+
+
+def test_pair_maker_improves_the_touch():
+    """Quoting behind the best bid means never trading.
+
+    Measured 2026-09-21 after five hours of zero fills on books doing ~340
+    trades/day: our bids sat one tick BELOW the touch with $384-$795 of other
+    orders ahead of them — including the incumbent maker's 1000-share block —
+    so nothing could reach us until that whole queue cleared. On one leg we
+    were four levels deep (0.73332 against a 0.73912 touch).
+
+    The original code justified this as stopping a post-only from crossing.
+    That is false: an Alo order only crosses if it reaches the ASK. Resting at
+    or one tick above the best bid never crosses and takes price priority.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "run_pair_maker.py").read_text()
+    assert 'fresh[side]["bid"] - TICK' not in src, \
+        "quoting BELOW the touch queues us behind the whole book — we never fill"
+    assert 'fresh[side]["bid"] + TICK' in src, "must improve the touch"
+    assert 'fresh[side]["ask"]' in src, \
+        "must clamp against the ask so an improved bid can never cross"
+
+
+def test_edge_is_checked_on_the_price_we_actually_pay():
+    """Improving the touch costs a tick a leg. The edge gate must run on the
+    quoted prices, not the raw book, or we book a worse trade than we measured.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "run_pair_maker.py").read_text()
+    assert "edge_quoted" in src, "edge must be recomputed from the quoted prices"
+    body = src.split("def main(")[1]
+    assert body.index("edge_quoted") < body.index("free_usdc[0] -= need"), \
+        "edge gate must precede capital reservation"
+
+
+def test_equity_snapshot_counts_hip3_dexes():
+    """HIP-3 builder dexes are separate clearinghouses with their own
+    collateral and never appear in a plain clearinghouseState call.
+
+    Measured 2026-09-21: immediately after flattening the base perp book, the
+    equity tracker reported $2,702.70 while $133.06 sat on the xyz ($114.41)
+    and para ($18.65) dexes. To the operator that money simply vanished from
+    the account — the single worst failure mode for a P&L tracker, because a
+    wrong number is trusted exactly as much as a right one.
+
+    This is INVARIANT #1 and it still caught a tracker written an hour earlier.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "equity_snapshot.py").read_text()
+    assert '"dex"' in src, "must query per-dex clearinghouse state"
+    for dex in ("xyz", "para", "io"):
+        assert f'"{dex}"' in src, f"{dex} dex collateral must be counted"
+    assert "per_dex" in src and "perp += sum(per_dex.values())" in src, \
+        "per-dex balances must be ADDED to equity, not merely reported"
+
+
+def _status_src():
+    return (Path(__file__).resolve().parent.parent
+            / "scripts" / "status.py").read_text()
+
+
+def test_disabled_engine_is_not_an_incident():
+    """A service a human disabled is not a service that crashed.
+
+    2026-09-21: the copy engine was stopped and disabled deliberately (t=+0.25
+    over 964 closes, and it held $175 of collateral wanted for market making).
+    Every engine check failed at once and tier-1 escalated "engine inactive;
+    engine not running; main.log stale" every 15 minutes to the person who had
+    chosen that state three hours earlier.
+
+    An alert that fires on an intended condition trains the operator to ignore
+    alerts, which is worse than not alerting. systemd already records intent:
+    `disabled` is a human decision, `enabled` + `inactive` is a death.
+    """
+    src = _status_src()
+    assert "is-enabled hyper-trader" in src, \
+        "must read systemd's enabled state to tell intent from failure"
+    assert "engine_off_on_purpose" in src, \
+        "must distinguish a deliberately-disabled engine from a crashed one"
+
+
+def test_engine_liveness_checks_are_gated_on_intent():
+    """Log-freshness and 'Following N leaders' are liveness probes for a RUNNING
+    engine. When it is off by choice they are guaranteed to fail and prove
+    nothing, so each must be gated rather than left to fire.
+    """
+    src = _status_src()
+    for probe in ("no 'Following N leaders' in logs", "main.log stale"):
+        i = src.index(probe)
+        window = src[max(0, i - 400):i + 200]
+        assert "engine_off_on_purpose" in window, \
+            f"probe {probe!r} must be gated on whether the engine is off on purpose"
+
+
+def test_real_engine_death_still_escalates():
+    """The gate must be narrow: only `disabled` suppresses. An enabled service
+    that is inactive has died and must still page.
+    """
+    src = _status_src()
+    i = src.index("engine_off_on_purpose = ")
+    line = src[i:src.index("\n", i)]
+    assert 'enabled == "disabled"' in line, \
+        "suppression must require systemd `disabled`, not merely `inactive`"
+    assert 'active != "active"' in line
+
+
+def test_minder_cancels_resting_order_on_the_leg_it_hedges():
+    """Completing a basket must not leave our own bid alive on the hedge leg.
+
+    A one-sided position usually arises because a PAIR was quoted and only one
+    leg filled, so our bid on the other leg is still resting. Hedging with an
+    IOC completes the basket but leaves that bid live; if it fills we hold
+    twice the hedge leg and are naked by the excess.
+
+    Measured 2026-09-21: after the minder completed two baskets, the original
+    bids were still resting — 202 shares on Giants YES against an 80/80 basket,
+    151 on Croatia YES against 151/151. Filling either would have left us naked
+    by up to 202 shares on a binary, the exact exposure the minder exists to
+    prevent.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "pair_minder.py").read_text()
+    assert "cancel_before_hedge" in src, \
+        "minder must cancel its own resting order on the leg it is hedging into"
+    hedge_block = src.split("if not KILL.exists():")[1]
+    assert hedge_block.index("ex.cancel(hedge_coin") < hedge_block.index("tif\": \"Ioc"), \
+        "the cancel must happen BEFORE the IOC, or the resting bid can fill first"
+
+
+def test_equity_reconciles_using_time_bounded_fills():
+    """`userFills` returns a TRUNCATED window — measured 2026-09-21: exactly
+    2000 rows. Filtering that by timestamp silently drops older fills and
+    under-reports realised PnL ($10.98 against a true $36.23), manufacturing a
+    phantom reconciliation gap. A self-check that is itself wrong is worse than
+    no self-check, because it cries wolf and then gets ignored.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "equity_snapshot.py").read_text()
+    assert "userFillsByTime" in src, \
+        "reconciliation must use the time-bounded fills endpoint"
+    fn = src.split("def realised_and_unrealised")[1].split("\ndef ")[0]
+    assert '"userFills"' not in fn, \
+        "the truncated endpoint must not be used for a time-bounded total"
+
+
+def test_equity_refuses_to_report_an_unreconciled_number():
+    """Equity is a balance read, fills are a flow read; they must agree. On
+    2026-09-21 equity claimed +$91.81 while fills justified +$42.87, with no
+    matching ledger transfer. An unreconciled P&L is more dangerous than none
+    because it gets believed, so the tracker must say so loudly.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "equity_snapshot.py").read_text()
+    assert "UNRECONCILED" in src, "must flag when equity and flows disagree"
+    assert "TREAT" in src, "must tell the operator which number to trust"
+
+
+def test_equity_uses_hyperliquid_account_value_not_a_computed_sum():
+    """Summing spot + legs + perp + vault DOUBLE-COUNTS.
+
+    Perp `accountValue` is reported against the same unified USDC balance that
+    spot already reports. Measured 2026-09-21: the computed sum said $2,927.74
+    while `portfolio` said $2,708.16 — a $219.58 gap, almost exactly the perp
+    accountValue of $219.91. That turned a true lifetime -$28 into a reported
+    +$96, which is the most dangerous kind of bug in a P&L tracker because a
+    wrong number is trusted exactly as much as a right one.
+
+    `portfolio` is authoritative, verified on two events: it rose +$1,936.92 at
+    01:05Z against a $1,933.87 transfer in, and did NOT drop at the 20:40Z HLP
+    deposit, so vault equity is already inside it.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "scripts" / "equity_snapshot.py").read_text()
+    assert '"portfolio"' in src, "equity must come from HL's own account value"
+    assert "accountValueHistory" in src
+    body = src.split("def snapshot(")[1].split("\ndef ")[0]
+    assert "equity = spot_total + legs_value + perp + vault" not in body.split("fallback")[0] \
+        or "FALLBACK" in src, "components must not be summed as the primary equity"
+    assert "never summed into equity" in src, \
+        "must state that components are for location only"

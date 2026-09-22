@@ -4,11 +4,45 @@ Production-grade Python toolkit for **Hyperliquid HIP-4 outcome markets** + perp
 
 - **Copy-trader** — discovers top traders from [Liquidiction](https://liquidiction.xyz) and mirrors their fills via HL websockets with risk caps + journaling.
 - **HIP-4 outcome trading** — patches the upstream Python SDK to support placing orders on outcome markets (the SDK currently omits the asset-ID encoding for `#NN` coins; this repo unblocks them).
-- **Outcome maker** (`src/maker.py`) — post-only paired bid/ask quoting with inventory skew, fee-aware spread floor, hard caps. Refuses negative-EV markets after fees.
+- **Round-trip maker** (`scripts/run_roundtrip_maker.py`) — the current strategy. Quotes ONE leg at the front of the book and, on fill, offers the *same* leg back as a maker. Never crosses, never settles.
+- **In-play guard** (`src/gamestate.py`) — refuses to quote any market whose event is live, imminent, or unresolvable. Four distinct holes found and closed; it is the reason a resting quote does not become a bet on a game someone else can already see.
+- **Outcome maker** (`src/maker.py`) — post-only paired bid/ask quoting with inventory skew, fee-aware spread floor, hard caps. *Superseded for outcome markets* — see "What we learned" below.
 - **Endgame strategy** (`src/endgame.py`) — opportunistic time-decay capture near binary expiry.
 - **Settlement detection** — the bot itself emits critical webhook alerts on HIP-4 settlement, so phone notifications fire even with no agent supervising.
 
-Every leader fill, intent, risk decision, and order outcome is appended to a JSONL trade journal for forensics. State persists across restarts (sqlite). 228 tests passing, ruff/mypy clean (strict).
+Every leader fill, intent, risk decision, and order outcome is appended to a JSONL trade journal for forensics. State persists across restarts (sqlite). 827 tests passing, ruff/mypy clean (strict).
+
+> **Read [`START_HERE.md`](START_HERE.md) first.** It routes you to the right doc
+> in one hop and marks which are current. Before proposing any strategy, read
+> [`MEASURED.md`](MEASURED.md) — every market finding with a date, a sample size
+> and a verdict. Most "new" ideas are already in there, measured and killed.
+
+## What we learned running this (2026-09)
+
+Recorded here because the numbers overturned things the rest of this README once
+asserted. Full evidence and sample sizes in [`MEASURED.md`](MEASURED.md).
+
+- **YES and NO are one book.** Every trade prints on both legs at prices summing
+  to exactly 1.000000 (n=807 matched prints); `askNO == 1 - bidYES` on 142/142
+  live legs. So "paired quoting" is two-sided market making in a single
+  instrument, and "hedging a one-sided fill" is just crossing to flatten — it
+  costs one tick *by construction*.
+- **Entry is free, every exit is charged.** Buys bill 0.00 bps maker or taker;
+  maker sells 7.83, taker sells 13.73, settlement 13.27. Holding to settlement
+  is the *expensive* exit, 3.4x dearer than selling the leg back as a maker.
+- **Quote AT the touch, never behind it.** Resting one tick below the best bid
+  put $384-$795 of queue ahead of us and produced zero fills in five hours on
+  books doing ~340 trades/day.
+- **Depth is not flow.** Four books showed $330-358 of resting depth at a clean
+  1.15% spread and had never traded — $0 volume, 0 fills, 24h and 7d. Rank
+  surfaces by realised flow, never by spread or depth.
+- **Never quote a live event.** In-play paired edge measured 6.68% against 0.17%
+  pre-match. That gap is someone knowing the score before the book does: 22
+  price moves landed with no score change, and a field goal moved the book zero
+  because it was already priced.
+- **LP rewards paid $0 over four consecutive epochs**, the last with front-of-book
+  quoting, a full 24h window and 94% maker share. Any plan whose economics depend
+  on reward income is dead on arrival.
 
 ## How copy-trading works
 
@@ -193,6 +227,18 @@ Test layout:
 | `tests/test_hl_outcome.py` | HIP-4 asset-ID encoding, outcome registration, idempotency, malformed responses |
 | `tests/test_endgame.py` | Tier logic, dry-run, sanity bounds, kill switch, error propagation |
 | `tests/test_maker.py` | Spread floor, inventory caps, post-only contract, sanity bounds, fill handling, cancel-replace, kill switch, expiry buffer |
+
+## P&L accounting
+
+Use `scripts/equity_snapshot.py`. It reads Hyperliquid's own
+`portfolio.accountValue` rather than summing components — summing spot + outcome
+legs + perp + vault **double-counts**, because perp `accountValue` is reported
+against the same unified USDC balance spot already reports. That error once
+turned a true −$28.72 into a reported +$96.
+
+It also nets out deposits (`true_pnl = equity − net_deposits`) and cross-checks
+every snapshot against the fills record, printing `UNRECONCILED` rather than a
+confident wrong number when the two disagree.
 
 ## Safety
 

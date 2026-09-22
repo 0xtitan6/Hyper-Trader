@@ -41,6 +41,7 @@ is high enough to matter, having measured 0 paired fills in 6 attempts so far.
 from __future__ import annotations
 
 import argparse
+import fcntl
 import logging
 import sys
 import time
@@ -61,8 +62,27 @@ MASTER = "0xE503186067b1B0Fb973c063054B14c4625434A1a"
 ENV = "/home/ec2-user/.config/hyper-trader/copytrader.env"
 INFO = "https://api.hyperliquid.xyz/info"
 KILL = Path(__file__).resolve().parent.parent / "KILL"
-# HIP-4 outcome legs price to 5dp; one tick behind the touch keeps a post-only
-# order from ever crossing.
+# Only one maker may hold capital-reservation state at a time. The reservation
+# is computed from a balance read at start-up, so two concurrent runs each
+# believe they can afford a pair and both place a first leg. Measured
+# 2026-09-21: a manual run and the 20-minute cron fired at 22:31:23 on the same
+# surface; the cron placed its YES leg and then had no capital for the NO,
+# leaving 116 shares of YES against 27 of NO. A 4:1 directional bet on England
+# that nobody chose — the one-sided shape that cost -$47 on 2026-09-19.
+LOCK = Path("/tmp/hip4-pair-requote.lock")
+# HIP-4 outcome legs price to 5dp.
+#
+# WE IMPROVE THE TOUCH BY ONE TICK — we do not sit behind it.
+# Sitting one tick BEHIND the best bid was why we took zero fills in five hours
+# of quoting on books doing ~340 trades/day. Measured 2026-09-21: our bids sat
+# with $384-$795 of other orders ahead of them, including the incumbent maker's
+# 1000-share block, so nothing could reach us until that entire queue cleared.
+# On one leg we were four levels deep (0.73332 against a 0.73912 touch).
+#
+# The old comment claimed sitting behind stopped a post-only from crossing.
+# That is wrong: a post-only (Alo) order only crosses if it reaches the ASK.
+# Resting AT or one tick ABOVE the best bid never crosses and puts us first in
+# line, which is the entire point of quoting.
 TICK = 0.0005
 
 log = logging.getLogger("pairmaker")
@@ -80,14 +100,43 @@ def post(body: dict, tries: int = 8):
     return None
 
 
-def scan(gs: GameState, min_edge: float, min_depth: float) -> list[dict]:
-    """Surfaces worth quoting: two-sided, not in play, and the pair is buyable
-    below par by at least `min_edge`."""
+def traded_24h(oid: int) -> tuple[float, int]:
+    """(USD volume, trade count) across both legs in the last 24h."""
+    now = int(time.time() * 1000)
+    vol = 0.0
+    n = 0
+    for side in (0, 1):
+        c = post({"type": "candleSnapshot",
+                  "req": {"coin": f"#{10 * oid + side}", "interval": "1h",
+                          "startTime": now - 24 * 3600 * 1000, "endTime": now}})
+        time.sleep(0.05)
+        if isinstance(c, list):
+            vol += sum(float(x["v"]) for x in c)
+            n += sum(int(x["n"]) for x in c)
+    return vol, n
+
+
+def scan(gs: GameState, min_edge: float, min_depth: float,
+         min_vol: float, min_trades: int) -> list[dict]:
+    """Surfaces worth quoting: two-sided, not in play, buyable below par by at
+    least `min_edge` — AND actually traded.
+
+    DEPTH IS NOT FLOW. Measured 2026-09-20: Kosovo, Greece, Serbia and Ireland
+    each showed $330-358 of resting depth at a clean 1.15% spread and had
+    NEVER TRADED — $0 volume, 0 fills, in 24h and in 7d. A bid resting in one
+    of those books earns nothing for as long as it sits there. That deep quote
+    is a single market maker posting 1000 shares a side at a fixed 1.15c on
+    every market from creation; it is not evidence that anyone wants to trade.
+
+    This is the same mistake three times now (empty books 09-19, frozen index
+    binaries 09-20, these 09-20). Ranking on depth finds books nobody uses.
+    Requiring flow is what makes a resting bid a trade rather than decoration.
+    """
     meta = post({"type": "outcomeMeta"}) or {}
     out = []
     for o in meta.get("outcomes", []):
         desc = o.get("description", "")
-        safe, reason = gs.is_safe_to_quote(desc)
+        safe, reason = gs.is_safe_to_quote(desc, o.get("name",""))
         if not safe:
             continue
         # Weekend-frozen underlyings. Measured 2026-09-20 (a Sunday): xyz:SP500,
@@ -120,7 +169,21 @@ def scan(gs: GameState, min_edge: float, min_depth: float) -> list[dict]:
         depth = min(legs[0]["depth"], legs[1]["depth"])
         if edge < min_edge or depth < min_depth:
             continue
+        # A wide pair is only capturable if BOTH bids fill. Bids far below mid
+        # essentially never both fill (measured: 91-95% end up one-sided), so a
+        # huge "edge" here is a wide illiquid book, not an opportunity.
+        mid_sum = ((legs[0]["bid"] + legs[0]["ask"]) / 2
+                   + (legs[1]["bid"] + legs[1]["ask"]) / 2)
+        if edge > 0.06 or abs(mid_sum - 1.0) > 0.06:
+            log.info("skip oid=%s — wide/incoherent book (edge %.1f%%, mids sum %.3f)",
+                     oid, edge * 100, mid_sum)
+            continue
+        vol, ntrades = traded_24h(oid)
+        if vol < min_vol or ntrades < min_trades:
+            log.info("skip oid=%s — no flow ($%.0f / %d trades in 24h)", oid, vol, ntrades)
+            continue
         out.append({"oid": oid, "desc": desc, "edge": edge, "depth": depth,
+                    "vol24": vol, "trades24": ntrades,
                     "legs": legs, "reason": reason})
     out.sort(key=lambda s: -s["edge"])
     return out
@@ -135,6 +198,10 @@ def main() -> int:
     ap.add_argument("--min-edge", type=float, default=0.004,
                     help="minimum 1-(bidYes+bidNo); safe books median ~0.0017")
     ap.add_argument("--min-depth", type=float, default=25.0)
+    ap.add_argument("--min-vol", type=float, default=500.0,
+                    help="minimum 24h traded USD across both legs; depth is NOT flow")
+    ap.add_argument("--min-trades", type=int, default=10,
+                    help="minimum 24h fill count across both legs")
     ap.add_argument("--execute", action="store_true", help="default is dry-run")
     args = ap.parse_args()
 
@@ -145,18 +212,28 @@ def main() -> int:
         print("KILL present — refusing to quote")
         return 3
 
+    # Held for the life of the process; released when it exits for any reason.
+    lock_fd = open(LOCK, "w")
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print("another pair-maker run holds the lock — refusing to quote "
+              "(concurrent runs half-enter pairs)")
+        return 4
+
     gs = GameState()
     if not gs.refresh():
         print("score feed unreachable — refusing to quote (fail safe)")
         return 2
 
-    surfaces = scan(gs, args.min_edge, args.min_depth)
+    surfaces = scan(gs, args.min_edge, args.min_depth, args.min_vol, args.min_trades)
     print(f"tradeable surfaces (not in play, edge >= {args.min_edge*100:.2f}%, "
           f"depth >= ${args.min_depth:.0f}): {len(surfaces)}")
     for s in surfaces[:10]:
         y, n = s["legs"][0], s["legs"][1]
         print(f"  edge {s['edge']*100:5.2f}%  bids {y['bid']:.4f}+{n['bid']:.4f}"
-              f"={y['bid']+n['bid']:.4f}  depth ${s['depth']:6.0f}  {s['desc'][:44]}  [{s['reason'][:30]}]")
+              f"={y['bid']+n['bid']:.4f}  depth ${s['depth']:5.0f}  vol24 ${s['vol24']:7.0f}"
+              f"/{s['trades24']:>3}t  {s['desc'][:34]}")
     if not surfaces:
         print("nothing qualifies right now")
         return 2
@@ -172,6 +249,11 @@ def main() -> int:
     info = Info(constants.MAINNET_API_URL, skip_ws=True, meta=meta, spot_meta=spot)
     for t in (info, ex.info):
         register_outcome_assets(t)
+
+    sp = post({"type": "spotClearinghouseState", "user": MASTER}) or {}
+    usdc = next((b for b in sp.get("balances", []) if b["coin"] == "USDC"), None)
+    free_usdc = [float(usdc["total"]) - float(usdc["hold"]) if usdc else 0.0]
+    print(f"free USDC: ${free_usdc[0]:.2f}")
 
     placed = []
     for s in surfaces[:args.max_pairs]:
@@ -200,20 +282,63 @@ def main() -> int:
                      s["oid"], s["edge"] * 100, edge_now * 100)
             continue
 
+        # SIZE BY SHARES, NOT BY DOLLARS. A basket redeems $1.00 per matched
+        # PAIR of shares, so the hedge is N shares of YES against N shares of
+        # NO. Equal dollars per leg buys unequal shares — it always overweights
+        # the cheap leg, because cheap means unlikely. Measured 2026-09-21: at
+        # $15/leg on a 0.7367/0.2503 book this placed 20 YES against 59 NO. Only
+        # 20 shares were hedged; the other 39 were a naked directional bet we
+        # did not choose. At 60/40 with $20 a side the same error loses $7 if
+        # YES wins and makes $10 if NO wins — a coin flip wearing a hedge's
+        # clothes.
+        # Price BOTH legs first, then check the edge on what we will really
+        # pay. Improving the touch costs one tick a leg; if that eats the edge
+        # the surface is not worth quoting and we skip it rather than quietly
+        # booking a worse trade than we measured.
+        quote = {}
+        for side in (0, 1):
+            q = round(fresh[side]["bid"] + TICK, 5)
+            if q >= fresh[side]["ask"]:
+                q = round(fresh[side]["bid"], 5)
+            quote[side] = q
+        pair_px = quote[0] + quote[1]
+        edge_quoted = 1.0 - pair_px
+        if edge_quoted < args.min_edge:
+            log.info("skip oid=%s — edge %.2f%% after improving the touch (was %.2f%%)",
+                     s["oid"], edge_quoted * 100, edge_now * 100)
+            continue
+        if pair_px <= 0:
+            continue
+        shares = int(args.usd_per_leg * 2 / pair_px)   # ONE count for both legs
+        if shares < 1:
+            log.info("skip oid=%s — $%.2f buys less than one full pair at %.4f",
+                     s["oid"], args.usd_per_leg * 2, pair_px)
+            continue
+
+        # Reserve capital for BOTH legs before placing EITHER. Running out
+        # mid-surface leaves a lone resting bid, which is a directional bet we
+        # did not choose — the exact shape that cost $47 on 2026-09-19. Better to
+        # skip a surface entirely than to half-enter it.
+        need = shares * pair_px
+        if free_usdc[0] < need:
+            log.info("skip oid=%s — $%.2f free, need $%.2f for %d-share pair",
+                     s["oid"], free_usdc[0], need, shares)
+            continue
+        free_usdc[0] -= need
+
         for side in (0, 1):
             coin = f"#{10 * s['oid'] + side}"
-            px = round(fresh[side]["bid"] - TICK, 5)
+            # Improve the touch to take price priority. Never reach the ask —
+            # Alo would reject it, and we would be paying the spread rather
+            # than earning it.
+            px = quote[side]
             if px <= 0:
                 continue
             # HIP-4 outcome legs trade in WHOLE shares. A fractional size is
             # rejected with {"error": "Order has invalid size."} — measured
             # 2026-09-20 after 8 orders silently failed because the code only
             # read statuses[0].resting and never looked at .error.
-            sz = float(int(args.usd_per_leg / px))
-            if sz < 1:
-                log.info("skip %s — $%.2f buys less than one share at %.5f",
-                         coin, args.usd_per_leg, px)
-                continue
+            sz = float(shares)   # SAME share count on both legs — see above
             try:
                 r = ex.order(coin, True, sz, px,
                              order_type={"limit": {"tif": "Alo"}},   # post-only: never take

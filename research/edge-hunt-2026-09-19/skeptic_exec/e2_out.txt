@@ -1,0 +1,24 @@
+
+=== XMR  n=40 snapshots  mid~570.6539
+  spread bp: mean 2.177 median 2.103 min 0.701 max 4.380 p90 3.329
+  levels returned: (20, 20)  top5 bid $2,720  all-level bid $12,448
+  RT slip vs mid $640: mean 2.95bp median 2.93 max 4.79  (unfillable in book 0/40)
+  RT slip vs mid $2000: mean 4.00bp median 3.84 max 7.24  (unfillable in book 0/40)
+  RT slip vs mid $10000: mean 9.78bp median 9.76 max 14.41  (unfillable in book 21/40)
+  RT $25000: unfillable in visible book 40/40
+
+=== BTC  n=40 snapshots  mid~81213.2000
+  spread bp: mean 0.123 median 0.123 min 0.123 max 0.123 p90 0.123
+  levels returned: (20, 20)  top5 bid $986,150  all-level bid $6,355,086
+  RT slip vs mid $640: mean 0.14bp median 0.12 max 0.56  (unfillable in book 0/40)
+  RT slip vs mid $2000: mean 0.16bp median 0.12 max 0.85  (unfillable in book 0/40)
+  RT slip vs mid $10000: mean 0.17bp median 0.12 max 0.96  (unfillable in book 0/40)
+  RT slip vs mid $25000: mean 0.19bp median 0.12 max 0.97  (unfillable in book 0/40)
+
+=== ETH  n=40 snapshots  mid~2622.8025
+  spread bp: mean 0.381 median 0.381 min 0.381 max 0.381 p90 0.381
+  levels returned: (20, 20)  top5 bid $1,775,635  all-level bid $9,612,069
+  RT slip vs mid $640: mean 0.39bp median 0.38 max 0.52  (unfillable in book 0/40)
+  RT slip vs mid $2000: mean 0.40bp median 0.38 max 0.69  (unfillable in book 0/40)
+  RT slip vs mid $10000: mean 0.51bp median 0.38 max 1.49  (unfillable in book 0/40)
+  RT slip vs mid $25000: mean 0.56bp median 0.38 max 1.74  (unfillable in book 0/40)
