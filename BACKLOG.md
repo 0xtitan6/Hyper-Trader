@@ -430,3 +430,11 @@ depth is not flow (see the Kosovo/Greece finding).
 Blocked on: nothing. Sized: 1h to measure, then decide. Priority: after the
 fill-rate read, alongside the crypto-barrier maker — both are "observable
 underlying" plays and share the same repricing machinery.
+
+## 2026-09-22 — allowed_market_types is the binding constraint (strategist)
+`risk.allowed_market_types: ['perp']` silently drops the majority of our leaders'
+flow (79 `intent_skipped reason=market_type` in a 3.2d journal window). Perp-only
+copy PnL: 0x9551e7d4 +$10.82, 0x511e60d3 -$26.17, 0xa3f996f2 -$113.44 (30d, $800 cap,
+5bps slip). Decision needed from Quorra/Neil: (a) enable outcome/spot mirroring so the
+edge our leaders actually have becomes reachable, or (b) source perp-native leaders.
+Weight tuning cannot fix this. Evidence: state/strategist_verdict_2026-09-22-1217.md

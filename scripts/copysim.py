@@ -61,6 +61,16 @@ def fetch_fills(addr, start_ms, end_ms):
     return out
 
 
+
+def market_type(coin: str) -> str:
+    """Mirror src/mirror.py:_is_allowed_market's classification exactly."""
+    if coin.startswith("#") or coin.startswith("+"):
+        return "outcome"
+    if coin.startswith("@") or "/" in coin:
+        return "spot"
+    return "perp"
+
+
 def simulate(fills, clip_usd, cap_usd, fee_bps, slip_bps, per_trade_max=120.0,
              per_trade_min=10.0):
     """Mirror each leader fill with our own clip. Returns (stats, per_coin, per_day)."""
@@ -150,6 +160,10 @@ def main():
     ap.add_argument("--caps", default="100,200,400,800")
     ap.add_argument("--slips", default="2,5,10,20")
     ap.add_argument("--cache", default="state/copysim_fills")
+    ap.add_argument("--markets", default="",
+                    help="comma list of market types to keep (perp,outcome,spot). "
+                         "Empty = all. Set this to config.yaml's risk.allowed_market_types "
+                         "to see what our engine can ACTUALLY reach.")
     args = ap.parse_args()
 
     now = int(time.time() * 1000)
@@ -168,6 +182,14 @@ def main():
             src = "api"
         if not fills:
             print(f"{addr}: NO FILLS in {args.days}d"); continue
+
+        if args.markets:
+            keep = {m.strip() for m in args.markets.split(",") if m.strip()}
+            before = len(fills)
+            fills = [f for f in fills if market_type(f["coin"]) in keep]
+            print(f"  [markets={sorted(keep)}] kept {len(fills)}/{before} fills")
+            if not fills:
+                print(f"{addr}: NO FILLS of type {sorted(keep)}"); continue
 
         days_active = len({time.strftime('%Y-%m-%d', time.gmtime(f['time']/1000)) for f in fills})
         taker = sum(1 for f in fills if f.get("crossed"))
