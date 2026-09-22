@@ -290,12 +290,36 @@ class GameState:
         except ValueError:
             return None
 
-    def is_safe_to_quote(self, description: str) -> tuple[bool, str]:
+    # A tournament market carries ONLY `participant:<Team>` — no fixture, no
+    # kickoff, no opponent — so resolving the team name to their most recent
+    # match answers the wrong question entirely.
+    #
+    # Measured 2026-09-22: `participant:Kansas City Chiefs`,
+    # `participant:Los Angeles Rams` and `participant:Manchester City` all
+    # passed because those teams' matches had just gone Final/Full Time, while
+    # $529 of our quotes sat in season-long books. A result landing is the
+    # moment a tournament price moves MOST, so "their game just ended" is the
+    # least safe time to quote, not the safest. Two of the three books were
+    # locked (bid == ask), so there was no spread to earn for the risk either.
+    #
+    # Refused outright until there is a rule that actually models them: they
+    # have no single fixture, but they move whenever the team plays AND when
+    # every rival result lands. This is the fourth distinct hole in this guard,
+    # after competition-keyed NFL, the England/New-England token collision, and
+    # unresolvable UFC.
+    TOURNAMENT_TEMPLATES = ("sportstournamentparticipant", "tournamentwinner")
+
+    def is_safe_to_quote(self, description: str, template: str = "") -> tuple[bool, str]:
         """Decide from a HIP-4 outcome description, e.g. 'participant:Fulham'.
 
         Returns (safe, reason). Non-sports markets are safe by default — this
         guard is about live events, not about every market.
         """
+        low_t = (template or "").lower()
+        if any(t in low_t for t in self.TOURNAMENT_TEMPLATES):
+            return False, ("tournament market — no single fixture; reprices on "
+                           "every result. Refusing (guard hole #4, 2026-09-22)")
+
         # PREFERRED PATH: the market states its own kickoff. No feed, no name
         # matching, no ambiguity about which fixture is meant.
         start = self.scheduled_start(description)

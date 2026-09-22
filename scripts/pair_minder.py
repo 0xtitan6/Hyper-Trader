@@ -227,6 +227,22 @@ def main() -> int:
 
     actions: list[str] = []
 
+    # Surfaces owned by the ROUND-TRIP maker. Single-leg inventory there is the
+    # strategy, not an accident: it buys a leg as maker and offers the SAME leg
+    # back as maker, never crossing and never settling (+3.8 to +15.6 bps).
+    #
+    # Measured 2026-09-21: within 5h of the round-trip maker going live, this
+    # minder had "hedged" 8 of its surfaces by buying the complement — silently
+    # converting every round trip into the cross-and-settle basket that costs
+    # -18.3 bps by construction, which is the trade we had just stopped running.
+    # Two strategies, opposite intentions, same inventory.
+    owned: set[int] = set()
+    try:
+        owned = set(json.loads((ROOT / "state" / "roundtrip_owned.json").read_text())
+                    .get("outcomes", []))
+    except (OSError, ValueError):
+        pass
+
     # --- 1. one-sided holdings -> hedge -------------------------------------
     one_sided = []
     for coin, sz in held.items():
@@ -235,6 +251,8 @@ def main() -> int:
         comp = f"+{oid}{1 - side}"
         if comp in held:
             continue          # already a complete basket
+        if oid in owned:
+            continue          # round-trip inventory — leave it alone
         one_sided.append((coin, sz, oid, side, comp))
 
     # Resting orders keyed by coin, so we can see an existing passive hedge.
@@ -288,7 +306,7 @@ def main() -> int:
         if not feed_ok:
             stale_orders.append((o, "score feed unreachable — cannot verify not-in-play"))
             continue
-        safe, reason = gs.is_safe_to_quote(d)
+        safe, reason = gs.is_safe_to_quote(d, o.get("name",""))
         if not safe:
             stale_orders.append((o, reason))
             continue

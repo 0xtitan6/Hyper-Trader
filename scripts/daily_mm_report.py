@@ -70,6 +70,13 @@ def main() -> int:
         if o["coin"].startswith("#"):
             legs[int(o["coin"][1:-1])].append(
                 (int(o["coin"][-1]), float(o["sz"]), float(o["limitPx"])))
+    rt_owned: set[int] = set()
+    try:
+        rt_owned = set(json.loads((ROOT / "state" / "roundtrip_owned.json")
+                                  .read_text()).get("outcomes", []))
+    except (OSError, ValueError):
+        pass
+
     quoting = 0.0
     unbalanced = []
     for oid, v in sorted(legs.items()):
@@ -81,11 +88,20 @@ def main() -> int:
               if "participant:" in d else str(oid))
         cost = sum(sz[s] * px[s] for s in sz)
         quoting += cost
-        ok = len(cnt) == 2 and sz.get(0) == sz.get(1)
+        # A single leg is NOT necessarily broken. The round-trip maker holds
+        # one leg on purpose — it buys as maker and offers the SAME leg back as
+        # maker, never pairing and never settling. Flagging those as BAD every
+        # day trains the operator to ignore this report, which is the whole
+        # value of it. Only surfaces the round-trip maker does NOT own must be
+        # balanced.
+        ok = (len(cnt) == 2 and sz.get(0) == sz.get(1)) or oid in rt_owned
         edge = 1.0 - sum(px.values()) if len(px) == 2 else 0.0
         if not ok:
             unbalanced.append(nm)
-        lines.append(f"{'  OK ' if ok else '  BAD'} {nm:<12} "
+        tag = "  OK " if ok else "  BAD"
+        if ok and oid in rt_owned and len(cnt) == 1:
+            tag = "  RT "                      # round-trip inventory, intended
+        lines.append(f"{tag} {nm:<12} "
                      f"{int(min(sz.values()))} sh/leg  ${cost:,.2f}  edge {edge*100:+.2f}%")
     if not legs:
         lines.append("  NOT QUOTING — no resting orders")
@@ -120,6 +136,24 @@ def main() -> int:
     except Exception:  # noqa: BLE001
         pass
 
+    # --- 5. agent reports filed since the last run ---------------------------
+    #
+    # The strategist, researcher and rewards crons no longer message the
+    # operator directly (2026-09-22, at his instruction: he orchestrates agents,
+    # and Quorra is the single interface). They write verdicts to disk; this
+    # surfaces anything new so a finding cannot sit unread in a file.
+    cutoff = now - 26 * 3600
+    filed = []
+    for pat in ("state/strategist_verdict_*.md", "research/*.md"):
+        for f in sorted(ROOT.glob(pat)):
+            try:
+                if f.stat().st_mtime > cutoff:
+                    first = next((l.strip() for l in f.read_text().splitlines()
+                                  if l.strip() and not l.startswith("#")), "")
+                    filed.append(f"  {f.relative_to(ROOT)} — {first[:90]}")
+            except OSError:
+                continue
+
     head = f"daily MM report {datetime.now(tz=timezone.utc):%Y-%m-%d %H:%M}Z"
     body = "\n".join([
         head,
@@ -129,6 +163,7 @@ def main() -> int:
         f"fills 24h: {len(fills)} ({len(maker)} maker) — ${notional:,.2f} notional",
         f"true P&L : {pnl_txt}",
         f"rewards  : {rw}",
+        *(["", f"agent reports filed ({len(filed)}):", *filed] if filed else []),
     ])
     print(body)
 

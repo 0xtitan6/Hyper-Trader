@@ -191,7 +191,7 @@ def main() -> int:
         if len(plan) >= args.max_surfaces:
             break
         d = o.get("description", "")
-        safe, reason = gs.is_safe_to_quote(d)
+        safe, reason = gs.is_safe_to_quote(d, o.get("name",""))
         if not safe:
             continue
         if any(t in d for t in ("perp:", "priceBinary", "priceDescription")):

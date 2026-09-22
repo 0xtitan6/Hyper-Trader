@@ -136,7 +136,7 @@ def scan(gs: GameState, min_edge: float, min_depth: float,
     out = []
     for o in meta.get("outcomes", []):
         desc = o.get("description", "")
-        safe, reason = gs.is_safe_to_quote(desc)
+        safe, reason = gs.is_safe_to_quote(desc, o.get("name",""))
         if not safe:
             continue
         # Weekend-frozen underlyings. Measured 2026-09-20 (a Sunday): xyz:SP500,
