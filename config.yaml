@@ -692,7 +692,13 @@ discovery:
     # equity over 19 positions = not averaging down, not a closedPnl illusion.
     # Re-bump condition UNCHANGED: sharpe >=0.2 AND maxDD <0.3x net in the
     # SAME window. If the next window clears both, bump 1.10 -> 1.50.
-    "0x511e60d32a1fdcafb46bae7f43cfab0a87040713": 1.10
+    # 2026-09-22 DE-LISTED — weight override removed with the pin. The re-bump
+    # condition above (sharpe >=0.2 AND maxDD <0.3x net) is RETIRED, not merely
+    # unmet: it was scored on all-markets PnL, and this wallet's edge is in
+    # outcome/spot flow that risk.allowed_market_types [perp] refuses. Perp-only
+    # it is -$26.17/30d. Do not re-add on a sharpe reading that has not been
+    # recomputed with --markets perp.
+    # "0x511e60d32a1fdcafb46bae7f43cfab0a87040713": 1.10
     # 2026-09-01 AUTO-DISCOVERED leader, NOT pinned. Explicit weight override to
     # cut its auto-Sharpe weight 1.32 -> 0.85 (-0.47, within the +/-0.5/run bound).
     # It has been trading LIVE since ~08-31 on zero backtest evidence, because
