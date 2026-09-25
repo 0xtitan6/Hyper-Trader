@@ -30,11 +30,11 @@ Invariants asserted (all drawn from INVARIANTS.md):
 
 Allowed imports: yaml, sys, pathlib, math. Nothing else.
 """
+
 from __future__ import annotations
 
 import math
 import pathlib
-import sys
 
 import yaml
 
@@ -63,9 +63,11 @@ def check_leader_weights_not_muted(cfg: dict) -> list[str]:
     fixed = sizing.get("fixed_usd")
     min_per = sizing.get("min_per_trade_usd")
     if fixed is None or min_per is None:
-        results.append(_fmt_fail(
-            f"sizing.fixed_usd={fixed} sizing.min_per_trade_usd={min_per} "
-            f"(both required)"))
+        results.append(
+            _fmt_fail(
+                f"sizing.fixed_usd={fixed} sizing.min_per_trade_usd={min_per} (both required)"
+            )
+        )
         return results
     weights = discovery.get("leader_weights") or {}
     if not weights:
@@ -75,19 +77,23 @@ def check_leader_weights_not_muted(cfg: dict) -> list[str]:
         try:
             w = float(weight)
         except (TypeError, ValueError):
-            results.append(_fmt_fail(
-                f"leader {addr[:12]}... has non-numeric weight={weight!r}"))
+            results.append(_fmt_fail(f"leader {addr[:12]}... has non-numeric weight={weight!r}"))
             continue
         # Floor to cent, matching what a real order-sizer would do
         clip = math.floor(float(fixed) * w * 100) / 100
         if clip < float(min_per):
-            results.append(_fmt_fail(
-                f"leader {addr[:12]}... MUTED: fixed_usd={fixed} * weight={w} "
-                f"= ${clip:.2f} clip < min_per_trade_usd=${min_per}"))
+            results.append(
+                _fmt_fail(
+                    f"leader {addr[:12]}... MUTED: fixed_usd={fixed} * weight={w} "
+                    f"= ${clip:.2f} clip < min_per_trade_usd=${min_per}"
+                )
+            )
         else:
-            results.append(_fmt_ok(
-                f"leader {addr[:12]}... clip ${clip:.2f} clears "
-                f"min_per_trade_usd ${min_per}"))
+            results.append(
+                _fmt_ok(
+                    f"leader {addr[:12]}... clip ${clip:.2f} clears min_per_trade_usd ${min_per}"
+                )
+            )
     return results
 
 
@@ -116,13 +122,15 @@ def check_no_zero_caps(cfg: dict) -> list[str]:
         try:
             v = float(val)
         except (TypeError, ValueError):
-            results.append(_fmt_fail(
-                f"risk.{name} has non-numeric value={val!r}"))
+            results.append(_fmt_fail(f"risk.{name} has non-numeric value={val!r}"))
             continue
         if v == 0:
-            results.append(_fmt_fail(
-                f"risk.{name}=0 — silent kill switch. A cap of zero disables "
-                f"the surface it protects with no error."))
+            results.append(
+                _fmt_fail(
+                    f"risk.{name}=0 — silent kill switch. A cap of zero disables "
+                    f"the surface it protects with no error."
+                )
+            )
         else:
             results.append(_fmt_ok(f"risk.{name}={v} non-zero"))
     return results
@@ -139,12 +147,14 @@ def check_per_clearinghouse_cap_present(cfg: dict) -> list[str]:
     results: list[str] = []
     risk = cfg.get("risk", {})
     if "max_dex_exposure_usd" not in risk:
-        results.append(_fmt_fail(
-            "risk.max_dex_exposure_usd MISSING — required per-clearinghouse "
-            "(2026-08-15: shared cap blocked 40/40 xyz opens)"))
+        results.append(
+            _fmt_fail(
+                "risk.max_dex_exposure_usd MISSING — required per-clearinghouse "
+                "(2026-08-15: shared cap blocked 40/40 xyz opens)"
+            )
+        )
     else:
-        results.append(_fmt_ok(
-            f"risk.max_dex_exposure_usd={risk['max_dex_exposure_usd']} present"))
+        results.append(_fmt_ok(f"risk.max_dex_exposure_usd={risk['max_dex_exposure_usd']} present"))
     return results
 
 

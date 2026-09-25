@@ -11,7 +11,7 @@ cheap, and each one failed before its fix.
 
 from __future__ import annotations
 
-import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -102,7 +102,7 @@ def tier1(monkeypatch, tmp_path: Path):
     def fake_sh(cmd: str, timeout: int = 30) -> str:
         if "is-active" in cmd:
             return "active"
-        if "wc -l" in cmd:          # ps | grep '[s]rc.main' | wc -l
+        if "wc -l" in cmd:  # ps | grep '[s]rc.main' | wc -l
             return "1"
         if "Following" in cmd:
             return "2026-09-16 12:01:00 INFO Following 2 leaders."
@@ -129,7 +129,6 @@ def test_stale_log_escalates_even_though_error_spew_continues(tier1, tmp_path):
     Correct check: parse reconcile timestamps from content, assert one within
     threshold.
     """
-    from datetime import datetime, timedelta
     log = tmp_path / "state" / "main.log"
     now = datetime.now()
     old_reconcile = now - timedelta(seconds=tier1.CYCLE_STALE_S + 600)
@@ -137,8 +136,9 @@ def test_stale_log_escalates_even_though_error_spew_continues(tier1, tmp_path):
     # Simulate error spew after the last successful cycle — recent mtime, but
     # no completed reconciles in the meantime
     for i in range(200):
-        lines.append(_log_line(now - timedelta(seconds=200 - i),
-                               "hl_fills: unreadable page 1 (429)"))
+        lines.append(
+            _log_line(now - timedelta(seconds=200 - i), "hl_fills: unreadable page 1 (429)")
+        )
     log.write_text("".join(lines))
 
     code, reasons = tier1.tier1_check()
@@ -150,10 +150,8 @@ def test_stale_log_escalates_even_though_error_spew_continues(tier1, tmp_path):
 def test_fresh_log_stays_healthy(tier1, tmp_path):
     """Guard against the opposite failure: a tier-1 that cries wolf every 15min
     is worse than no tier-1, because it trains the operator to ignore it."""
-    from datetime import datetime
     log = tmp_path / "state" / "main.log"
-    log.write_text(_log_line(datetime.now(),
-                             "reconcile upstream=3 local=3 zeroed=[]"))
+    log.write_text(_log_line(datetime.now(), "reconcile upstream=3 local=3 zeroed=[]"))
 
     code, reasons = tier1.tier1_check()
 
@@ -172,11 +170,10 @@ def test_missing_log_escalates(tier1, tmp_path):
 def test_rotation_does_not_false_escalate(tier1, tmp_path):
     """logrotate briefly leaves the freshest writes in main.log.1. If the
     reconcile happened just before rotation, we still need to find it."""
-    from datetime import datetime
     (tmp_path / "state" / "main.log").write_text("")  # empty post-truncate
     (tmp_path / "state" / "main.log.1").write_text(
-        _log_line(datetime.now(),
-                  "reconcile upstream=3 local=3 — landed in rotated copy"))
+        _log_line(datetime.now(), "reconcile upstream=3 local=3 — landed in rotated copy")
+    )
 
     code, reasons = tier1.tier1_check()
 
@@ -198,8 +195,6 @@ def test_watchdog_watches_the_real_log() -> None:
 
     # Strip comments — the fix's own rationale comment names the old path.
     src = inspect.getsource(watchdog.check_once)
-    code_only = "\n".join(
-        ln for ln in src.splitlines() if not ln.strip().startswith("#")
-    )
+    code_only = "\n".join(ln for ln in src.splitlines() if not ln.strip().startswith("#"))
     assert '"state" / "main.log"' in code_only
     assert "run.log" not in code_only

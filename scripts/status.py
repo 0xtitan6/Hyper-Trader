@@ -14,6 +14,7 @@ grep-able and boring -- no prose, no decoration.
     ./scripts/status.py            # health pass
     ./scripts/status.py --risk     # add per-position liq buffers
 """
+
 from __future__ import annotations
 
 import argparse
@@ -28,8 +29,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 def sh(cmd: str, timeout: int = 30) -> str:
     try:
-        return subprocess.run(cmd, shell=True, capture_output=True, text=True,
-                              timeout=timeout, cwd=ROOT).stdout.strip()
+        return subprocess.run(
+            cmd, shell=True, capture_output=True, text=True, timeout=timeout, cwd=ROOT
+        ).stdout.strip()
     except subprocess.TimeoutExpired:
         return ""
 
@@ -50,6 +52,7 @@ def _last_reconcile_ts(root: pathlib.Path) -> float | None:
     within the scan window in either file.
     """
     import re
+
     ts_re = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
     reconcile_re = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})[^\n]*reconcile")
     cutoff = time.time() - SCAN_WINDOW_S
@@ -105,8 +108,7 @@ def _last_reconcile_ts(root: pathlib.Path) -> float | None:
                 any_ts = ts_re.match(text)
                 if any_ts:
                     try:
-                        ts = time.mktime(time.strptime(any_ts.group(1),
-                                                        "%Y-%m-%d %H:%M:%S"))
+                        ts = time.mktime(time.strptime(any_ts.group(1), "%Y-%m-%d %H:%M:%S"))
                         if ts < cutoff:
                             stop = True
                             break
@@ -122,9 +124,9 @@ def _last_reconcile_ts(root: pathlib.Path) -> float | None:
 # Idea taken from Ruflo's "Agent Booster / Tier 1" framing (deterministic path,
 # $0, escalate only on need). The tiering vocabulary is theirs; the specific
 # conditions below are ours, drawn from INVARIANTS.md.
-CYCLE_STALE_S = 900   # 3x the observed 303s worst-case gap between reconcile events
+CYCLE_STALE_S = 900  # 3x the observed 303s worst-case gap between reconcile events
 SCAN_WINDOW_S = CYCLE_STALE_S * 2  # bound the log scan by time, not line count —
-                                   # a 429 burst cannot starve the window
+# a 429 burst cannot starve the window
 
 
 def tier1_check() -> tuple[int, list[str]]:
@@ -174,12 +176,12 @@ def tier1_check() -> tuple[int, list[str]]:
     else:
         age = time.time() - last_cycle_ts
         if age > CYCLE_STALE_S:
-            reasons.append(f"reconcile stale: last cycle {age/60:.0f} min ago")
+            reasons.append(f"reconcile stale: last cycle {age / 60:.0f} min ago")
 
     free = sh("df --output=avail -k / | tail -1")
     try:
-        if int(free) < 500_000:                       # <500MB
-            reasons.append(f"disk low: {int(free)//1024}MB free")
+        if int(free) < 500_000:  # <500MB
+            reasons.append(f"disk low: {int(free) // 1024}MB free")
     except ValueError:
         pass
 
@@ -201,15 +203,18 @@ def tier1_check() -> tuple[int, list[str]]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--risk", action="store_true", help="include per-position liq buffers")
-    ap.add_argument("--check", action="store_true",
-                    help="TIER 1: exit 0 if healthy, 1 if an agent is needed. No LLM.")
+    ap.add_argument(
+        "--check",
+        action="store_true",
+        help="TIER 1: exit 0 if healthy, 1 if an agent is needed. No LLM.",
+    )
     ap.add_argument("--hours", type=float, default=6.0)
     args = ap.parse_args()
 
     if args.check:
         code, reasons = tier1_check()
         if code == 0:
-            print("HEALTHY")            # no agent, no model, no tokens
+            print("HEALTHY")  # no agent, no model, no tokens
         else:
             print("ESCALATE: " + "; ".join(reasons))
         return code
@@ -226,8 +231,10 @@ def main() -> int:
     # and again an hour later when the rotated copy was compressed to .gz. Both
     # times a healthy engine reported "NONE SEEN", and the tier-1 check uses this
     # same lookup, so it would have false-escalated every 15 minutes.
-    following = sh("{ grep -h 'Following .* leaders' state/main.log state/main.log.1 2>/dev/null; "
-                   "zgrep -h 'Following .* leaders' state/main.log.*.gz 2>/dev/null; } | tail -1")
+    following = sh(
+        "{ grep -h 'Following .* leaders' state/main.log state/main.log.1 2>/dev/null; "
+        "zgrep -h 'Following .* leaders' state/main.log.*.gz 2>/dev/null; } | tail -1"
+    )
     following = following.split("]")[-1].strip() if following else "NONE SEEN"
     flag = "  <<< DOUBLE-RUN" if n not in ("1", "?") else ""
     print(f"ENGINE {active} procs={n}{flag} | {following}")
@@ -238,8 +245,10 @@ def main() -> int:
         lines = [ln for ln in wins.read_text().splitlines() if ln.strip()]
         if lines:
             d = json.loads(lines[-1])
-            print(f"ACCOUNT ${d['total']:.2f} unreal={d.get('unrealized',0):+.2f} "
-                  f"to_target=${d.get('to_target',0):.2f} @{d['utc'][5:16]}")
+            print(
+                f"ACCOUNT ${d['total']:.2f} unreal={d.get('unrealized', 0):+.2f} "
+                f"to_target=${d.get('to_target', 0):.2f} @{d['utc'][5:16]}"
+            )
 
     # --- what got blocked: this bot's dominant failure mode (INV 5) ---------
     cutoff = time.time() - args.hours * 3600
@@ -279,7 +288,11 @@ def main() -> int:
     if args.risk:
         out = sh(".venv/bin/python scripts/risk_snapshot.py", timeout=120)
         for ln in out.splitlines():
-            if ln.startswith(("ACCOUNT_HEALTH", "WORST_TIER")) or "tier=CRITICAL" in ln or "tier=WARN" in ln:
+            if (
+                ln.startswith(("ACCOUNT_HEALTH", "WORST_TIER"))
+                or "tier=CRITICAL" in ln
+                or "tier=WARN" in ln
+            ):
                 print(ln)
     return 0
 
