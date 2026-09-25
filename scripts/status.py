@@ -34,6 +34,87 @@ def sh(cmd: str, timeout: int = 30) -> str:
         return ""
 
 
+def _last_reconcile_ts(root: pathlib.Path) -> float | None:
+    """Return unix ts of the most recent reconcile line across main.log{,.1}.
+
+    Scan is TIME-BOUNDED, not line-count bounded: walks upward from EOF until
+    a timestamp older than SCAN_WINDOW_S is seen, then stops. Rationale: a
+    fixed-size tail (say 256KB) can be starved by a 429 burst — thousands of
+    error lines evict the last reconcile from the window and the check
+    false-escalates on a healthy engine. A time bound cannot be starved: if
+    the reconcile is within the window, it's in the scan; if it isn't,
+    that's the failure mode we want to fire on.
+
+    Timestamp format: `YYYY-MM-DD HH:MM:SS` at column 0, UTC (system tz is
+    UTC, verified 2026-09-25). Returns None if no reconcile line is found
+    within the scan window in either file.
+    """
+    import re
+    ts_re = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+    reconcile_re = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})[^\n]*reconcile")
+    cutoff = time.time() - SCAN_WINDOW_S
+    newest: float | None = None
+
+    for name in ("main.log", "main.log.1"):
+        p = root / "state" / name
+        try:
+            size = p.stat().st_size
+        except OSError:
+            continue
+        # Read in 256KB chunks from the tail upward until we see a timestamp
+        # older than the scan window. Cap total read at 32MB as a safety belt
+        # against pathological cases (clock skew, corrupted timestamps).
+        CHUNK = 262_144
+        MAX_READ = 32 * 1024 * 1024
+        buf = b""
+        pos = size
+        stop = False
+        while pos > 0 and (size - pos) < MAX_READ and not stop:
+            read_size = min(CHUNK, pos)
+            pos -= read_size
+            try:
+                with p.open("rb") as f:
+                    f.seek(pos)
+                    chunk = f.read(read_size)
+            except OSError:
+                break
+            buf = chunk + buf
+            # Process complete lines (drop leading partial if we're not at file start)
+            lines = buf.splitlines()
+            if pos > 0:
+                buf = lines[0] if lines else b""
+                lines = lines[1:]
+            else:
+                buf = b""
+            # Walk bottom-up: newest match wins; stop when we cross the cutoff
+            for line in reversed(lines):
+                try:
+                    text = line.decode("utf-8", "ignore")
+                except (UnicodeDecodeError, AttributeError):
+                    continue
+                m = reconcile_re.match(text)
+                if m:
+                    try:
+                        ts = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+                        newest = max(newest or 0.0, ts)
+                        stop = True
+                        break
+                    except (ValueError, OverflowError):
+                        continue
+                # Time-bound check on ANY timestamped line (not just reconciles)
+                any_ts = ts_re.match(text)
+                if any_ts:
+                    try:
+                        ts = time.mktime(time.strptime(any_ts.group(1),
+                                                        "%Y-%m-%d %H:%M:%S"))
+                        if ts < cutoff:
+                            stop = True
+                            break
+                    except (ValueError, OverflowError):
+                        continue
+    return newest
+
+
 # Conditions that a deterministic check can settle on its own. Everything here
 # is a known-shape fact, not a judgement -- which is the whole point: the
 # operator agent exists for judgement, and ~95% of its runs have none to make.
@@ -41,7 +122,9 @@ def sh(cmd: str, timeout: int = 30) -> str:
 # Idea taken from Ruflo's "Agent Booster / Tier 1" framing (deterministic path,
 # $0, escalate only on need). The tiering vocabulary is theirs; the specific
 # conditions below are ours, drawn from INVARIANTS.md.
-LOG_STALE_S = 900   # 3x the observed 303s worst-case gap between writes
+CYCLE_STALE_S = 900   # 3x the observed 303s worst-case gap between reconcile events
+SCAN_WINDOW_S = CYCLE_STALE_S * 2  # bound the log scan by time, not line count —
+                                   # a 429 burst cannot starve the window
 
 
 def tier1_check() -> tuple[int, list[str]]:
@@ -60,40 +143,38 @@ def tier1_check() -> tuple[int, list[str]]:
         reasons.append("KILL file present")
 
     # INV 7: `active` is not proof we trade. A start that aborted after opening
-    # the websocket once kept its PID and reported healthy to everything.
-    # Must cover EVERY rotation state: live, rotated, and gzipped. This has now
-    # broken twice -- once when logrotate truncated main.log (2026-09-11 19:17)
-    # and again an hour later when the rotated copy was compressed to .gz. Both
-    # times a healthy engine reported "NONE SEEN", and the tier-1 check uses this
-    # same lookup, so it would have false-escalated every 15 minutes.
-    following = sh("{ grep -h 'Following .* leaders' state/main.log state/main.log.1 2>/dev/null; "
-                   "zgrep -h 'Following .* leaders' state/main.log.*.gz 2>/dev/null; } | tail -1")
-    if not following:
-        reasons.append("no 'Following N leaders' in logs")
-
-    # INV 7, part 2 (2026-09-19). The grep above matches a STARTUP line, which
-    # persists in the log forever — it proves the engine once began following,
-    # not that it is still working. A process that goes blind with its log file
-    # intact passes that check indefinitely. So bound it by recency: the engine
-    # writes continuously (observed max gap 303s on a live engine), and the
-    # reconcile loop alone touches the log every ~5 min. 900s is 3x the observed
-    # worst case — wide enough not to false-escalate, tight enough to catch a
-    # hung or unlinked engine within one tier-1 cycle.
+    # the websocket once kept its PID and reported healthy to everything. We
+    # need to assert that the engine is CYCLING, not just emitting bytes.
     #
-    # Rotation-safe: take the NEWEST mtime across main.log and main.log.1, since
-    # logrotate briefly leaves the fresh writes in the rotated copy.
-    newest: float | None = None
-    for name in ("main.log", "main.log.1"):
-        try:
-            newest = max(newest or 0.0, (ROOT / "state" / name).stat().st_mtime)
-        except OSError:
-            continue
-    if newest is None:
-        reasons.append("main.log missing entirely")
+    # 2026-09-25 lesson (two-layer error):
+    #   Layer 1 removed: `grep 'Following .* leaders'` matched a STARTUP-only
+    #     line. Once logrotate aged out every rotation containing it (~4 days),
+    #     the check false-escalated permanently on a healthy engine. Tier1
+    #     flipped solid FAIL at 2026-09-24T20:30Z when the last rotation
+    #     holding the string was dropped.
+    #   Layer 2 removed: file-mtime freshness (`st_mtime > age_s`). Passed as
+    #     long as ANY bytes hit main.log — including pure 429-error spew with
+    #     zero reconcile cycles completing. 670 tier1 runs, zero freshness
+    #     fires: not because the engine was healthy, but because the check
+    #     couldn't distinguish "cycling" from "erroring loudly." A guard that
+    #     can never fire isn't a guard.
+    #
+    # Correct assertion: parse the log content for a recent reconcile event.
+    # Reconcile fires roughly every 5 min in mirror.py; 900s = 3x that gives
+    # ~1.67x headroom over the 9-min p95 measured under current 429 load. If
+    # rate limiting worsens the p95 further, this threshold needs revisiting.
+    # Empirical: 670 runs at ~5min cadence = ~2.3 days of evidence, all under
+    # active 429 conditions.
+    #
+    # Rotation-safe: search both main.log and main.log.1 (logrotate copytruncate
+    # briefly leaves fresh writes in the rotated copy).
+    last_cycle_ts = _last_reconcile_ts(ROOT)
+    if last_cycle_ts is None:
+        reasons.append("no reconcile in main.log{,.1}")
     else:
-        age = time.time() - newest
-        if age > LOG_STALE_S:
-            reasons.append(f"main.log stale: no write for {age/60:.0f} min")
+        age = time.time() - last_cycle_ts
+        if age > CYCLE_STALE_S:
+            reasons.append(f"reconcile stale: last cycle {age/60:.0f} min ago")
 
     free = sh("df --output=avail -k / | tail -1")
     try:

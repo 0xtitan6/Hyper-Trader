@@ -114,19 +114,32 @@ def tier1(monkeypatch, tmp_path: Path):
     return status
 
 
-def test_stale_log_escalates_even_though_following_line_exists(tier1, tmp_path):
-    """The zombie's exact signature: startup line present, nothing written since.
+def _log_line(dt: datetime, msg: str) -> str:
+    return f"{dt.strftime('%Y-%m-%d %H:%M:%S')} INFO [src.mirror] {msg}\n"
 
-    `grep 'Following N leaders'` matches a STARTUP line that persists in the log
-    forever. It proves the engine once began following — not that it is still
-    working. Before the recency bound, this state reported HEALTHY indefinitely.
+
+def test_stale_log_escalates_even_though_error_spew_continues(tier1, tmp_path):
+    """The zombie's exact signature: log receiving bytes (429 spew, etc.) but
+    no reconcile cycles completing.
+
+    Previous checks were fooled by this two ways:
+      - `grep 'Following N leaders'`: startup-only line, aged out by logrotate.
+      - file mtime freshness: passes as long as ANY bytes hit the log,
+        including pure error spew.
+    Correct check: parse reconcile timestamps from content, assert one within
+    threshold.
     """
+    from datetime import datetime, timedelta
     log = tmp_path / "state" / "main.log"
-    log.write_text("2026-09-16 12:01:00 INFO Following 2 leaders.\n")
-    stale = time.time() - (tier1.LOG_STALE_S + 600)
-    import os
-
-    os.utime(log, (stale, stale))
+    now = datetime.now()
+    old_reconcile = now - timedelta(seconds=tier1.CYCLE_STALE_S + 600)
+    lines = [_log_line(old_reconcile, "reconcile upstream=3 local=3")]
+    # Simulate error spew after the last successful cycle — recent mtime, but
+    # no completed reconciles in the meantime
+    for i in range(200):
+        lines.append(_log_line(now - timedelta(seconds=200 - i),
+                               "hl_fills: unreadable page 1 (429)"))
+    log.write_text("".join(lines))
 
     code, reasons = tier1.tier1_check()
 
@@ -137,8 +150,10 @@ def test_stale_log_escalates_even_though_following_line_exists(tier1, tmp_path):
 def test_fresh_log_stays_healthy(tier1, tmp_path):
     """Guard against the opposite failure: a tier-1 that cries wolf every 15min
     is worse than no tier-1, because it trains the operator to ignore it."""
+    from datetime import datetime
     log = tmp_path / "state" / "main.log"
-    log.write_text("2026-09-19 01:26:00 INFO Following 2 leaders.\n")
+    log.write_text(_log_line(datetime.now(),
+                             "reconcile upstream=3 local=3 zeroed=[]"))
 
     code, reasons = tier1.tier1_check()
 
@@ -151,18 +166,17 @@ def test_missing_log_escalates(tier1, tmp_path):
     code, reasons = tier1.tier1_check()
 
     assert code == 1
-    assert any("main.log" in r for r in reasons), reasons
+    assert any("reconcile" in r or "main.log" in r for r in reasons), reasons
 
 
 def test_rotation_does_not_false_escalate(tier1, tmp_path):
-    """logrotate briefly leaves the freshest writes in main.log.1. This has
-    broken the sibling `Following` lookup twice already (2026-09-11)."""
-    (tmp_path / "state" / "main.log").write_text("")
-    old = time.time() - (tier1.LOG_STALE_S + 600)
-    import os
-
-    os.utime(tmp_path / "state" / "main.log", (old, old))
-    (tmp_path / "state" / "main.log.1").write_text("fresh writes landed here\n")
+    """logrotate briefly leaves the freshest writes in main.log.1. If the
+    reconcile happened just before rotation, we still need to find it."""
+    from datetime import datetime
+    (tmp_path / "state" / "main.log").write_text("")  # empty post-truncate
+    (tmp_path / "state" / "main.log.1").write_text(
+        _log_line(datetime.now(),
+                  "reconcile upstream=3 local=3 — landed in rotated copy"))
 
     code, reasons = tier1.tier1_check()
 
