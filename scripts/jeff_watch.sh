@@ -55,31 +55,19 @@ summary=$(awk '
   /^[^# ]/ {seen=1; print}
 ' "$newest" | head -30 | tr '\n' ' ' | cut -c1-500)
 
-# Build Telegram message. Uses the same env pattern as operator_tier1.sh.
-msg="[JEFF · Type B / Yellow]
-${n} new finding(s), latest: ${newest_name}
+# Log locally regardless of whether Telegram is reachable
+echo "[$ts] JEFF ESCALATION: ${n} findings, latest=${newest_name}" >> "$ALERTS"
+
+# Persona-tagged escalation via shared helper. yellow = Type B strategy.
+msg_body="${n} new finding(s), latest: ${newest_name}
 
 ${title}
 
 ${summary}...
 
-Path: ${newest}
-Escalation: Quorra to review, decide, respond."
-
-# Log locally regardless of whether Telegram is reachable
-echo "[$ts] JEFF ESCALATION: ${n} findings, latest=${newest_name}" >> "$ALERTS"
-
-# Try Telegram; log-only if env not set (matches operator_tier1.sh pattern)
-if [ -f .env ]; then
-  # shellcheck disable=SC1091
-  source .env 2>/dev/null || true
-  if [ -n "${ALERT_WEBHOOK_URL:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
-    curl -sS --max-time 15 -X POST "$ALERT_WEBHOOK_URL" \
-      -d chat_id="$TELEGRAM_CHAT_ID" \
-      -d text="$msg" \
-      >/dev/null 2>&1 || echo "[$ts] jeff_watch: telegram send failed" >> "$ALERTS"
-  fi
-fi
+Path: ${newest}"
+./scripts/escalate.sh jeff yellow "$msg_body" >/dev/null 2>&1 || \
+  echo "[$ts] jeff_watch: escalate.sh failed" >> "$ALERTS"
 
 # Update pointer AFTER successful escalation. If Telegram fails but we've
 # logged, still advance — the alerts file is the durable record.
