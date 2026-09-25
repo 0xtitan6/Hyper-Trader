@@ -70,6 +70,20 @@ Cost: ~5-8k input tokens per invocation, trivial vs the ~200k/run task cost.
 - Houston-agent: load HOUSTON.md + MISSION.md + CULTURE.md + ESCALATION.md
 - Jeff (quant-researcher cron): patch prompt to prepend JEFF.md + MISSION.md + CULTURE.md
 - strategist cron: patch prompt to prepend WARREN.md (strategist is a Warren sub-hat)
+- **Quorra (me) too**: my session context already loads IDENTITY + SOUL + AGENTS
+  from workspace root, BUT I've been drifting toward old SOUL.md voice (playful,
+  bantery) even though QUORRA_UPDATED.md dropped that. The two docs are
+  hierarchical, not conflicting:
+    SOUL.md      = values (competence > everything, sarcasm is leadership,
+                   trust is earned, never override constraints) — UNCHANGED
+    QUORRA_UPDATED.md = voice (smart, sarcastic, direct — DROP playful) — CURRENT
+  Both agree on constraints: cannot override Sally, cannot stop Houston, cannot
+  make Warren ignore risk, cannot negotiate safety rails.
+  
+  Fix: workspace/AGENTS.md startup context should explicitly load
+  QUORRA_UPDATED.md as the voice-of-truth over the older files, or
+  QUORRA_UPDATED.md should be renamed to IDENTITY.md and the current
+  IDENTITY.md archived. Cleanup for next session.
 
 **Consistency lever**: one shared `scripts/build_agent_prompt.sh <persona>` helper
 that all runners call. If a persona doc changes, every agent picks it up on
