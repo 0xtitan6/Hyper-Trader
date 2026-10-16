@@ -109,8 +109,15 @@ class PositionTracker:
             self._subscribed = True
 
     def realized_pnl_today(self) -> float:
-        """Net of fees: closedPnl - fee. This is what the daily-loss kill switch checks."""
-        gross, fee = self.state.daily_pnl(today_utc())
+        """Net PnL (closedPnl - fee) over a rolling 24h window.
+
+        Changed 2026-10-16 from a UTC-day partition to a rolling window. The
+        day-partition version let 24h bleeds crossing midnight sidestep the
+        daily-loss cap: $45 on day N + $43 on day N+1 reads as two sub-$80
+        days when it's really an $88 bleed. The rolling window catches that.
+        """
+        since_s = int(time.time() - 86400)
+        gross, fee = self.state.pnl_since(since_s)
         return gross - fee
 
     def realized_pnl_today_gross(self) -> float:

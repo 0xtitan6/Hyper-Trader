@@ -146,6 +146,22 @@ class State:
             ).fetchone()
             return float(row["pnl"]), float(row["fee"])
 
+    def pnl_since(self, since_s: int) -> tuple[float, float]:
+        """Return (realized_pnl, total_fees) for fills with ts >= since_s.
+
+        Rolling-window variant of daily_pnl — survives UTC-midnight slow bleeds
+        that the YYYY-MM-DD partition splits in two. own_fills.ts is in SECONDS
+        (positions._handle divides HL's ms timestamp by 1000). Pass
+        `int(time.time()-86400)` to read the last 24h.
+        """
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT COALESCE(SUM(closed_pnl), 0.0) AS pnl, "
+                "COALESCE(SUM(fee), 0.0) AS fee FROM own_fills WHERE ts >= ?",
+                (since_s,),
+            ).fetchone()
+            return float(row["pnl"]), float(row["fee"])
+
     def get_position(self, coin: str) -> tuple[float, float]:
         """Return (sz, avg_px). Zero if unknown."""
         with self._lock, self._connect() as conn:
