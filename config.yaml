@@ -480,7 +480,35 @@ discovery:
     # leaderboard ABSENCE, not a dead slot (609 backtested trades + a funded
     # $8.6k wallet with an open position). It is in the book only because it
     # is pinned, which is exactly why it was pinned.
-    "0x9551e7d4cd963558bb9882aecc74f549262e217f": 1.25
+    # 2026-09-30 Quorra: -0.15 per Jeff 10-run standing proposal. 14d SKHX
+    # +$15 intact, 30d slightly neg but improving; 1.25 was cap-binding at
+    # wrong side of optimum. Softer than Jeff's initial 0.75 ask (2026-09-28)
+    # after xyz:XYZ100 orphan close unmuted SKHX.
+    # 2026-10-15 Quorra Strategist: NET-OF-REBASELINE 1.10 -> 0.60 (-0.50,
+    # per-run bound). This supersedes the uncommitted 10-13 edit whose
+    # parked-SKHX-bag thesis has since been FALSIFIED (the leader took the
+    # loss: xyz equity $207k -> $44.6k, -78%), but reaches the same number
+    # on fresh evidence:
+    #  (1) Fresh perp copysim at the live $800 base cap (not cache): 7d
+    #        NET -$136.64, 14d -$199.75, 30d -$53.85. All three windows
+    #        negative. 1,139 of 1,629 7d fills kept (perp-only). 95.1% of
+    #        opens blocked by cap at w=1.10. Lower weight = less loss,
+    #        approximately linear in this cap-saturated regime
+    #        [[weight-is-the-cap-lever]].
+    #  (2) 100% of 7d losses are xyz:SKHX, the symbol the leader has just
+    #        taken a realized loss on. If SKHX had been edge it would be
+    #        compounding; it is not. Not a maker/fee-tier illusion either
+    #        (82-92% taker on perps).
+    #  (3) Leader still alive and still trading (1,629 fills/7d, eq $44.6k)
+    #        but ROTATED: open xyz:GOLD +111 @ 10x isolated -$1,208 unrealized
+    #        (-2.7% eq). Different symbol = different (unmeasured) edge, no
+    #        reachable backtest on it yet.
+    # CUT not DROP: leader is active and funded, just coming off a bad run.
+    # Keep the slot pinned so the engine watches. Next window with NEGATIVE
+    # 7d AND 30d perp copysim = drop from always_follow entirely.
+    # Mute check: $30 * 0.60 = $18.00 clip, clears $10 min, under $120 max. No
+    # silent mute-by-rounding.
+    "0x9551e7d4cd963558bb9882aecc74f549262e217f": 0.60
     # 2026-08-25: pinned this run (see always_follow). Weight set to 1.27,
     # which is EXACTLY where auto-sharpe weighting already had it
     # (clip(sharpe+1.0) on its realized sharpe 0.27 = 1.27). leader_weights
@@ -679,7 +707,9 @@ discovery:
     # equity over 19 positions = not averaging down, not a closedPnl illusion.
     # Re-bump condition UNCHANGED: sharpe >=0.2 AND maxDD <0.3x net in the
     # SAME window. If the next window clears both, bump 1.10 -> 1.50.
-    "0x511e60d32a1fdcafb46bae7f43cfab0a87040713": 1.10
+    # 2026-09-30 Quorra: -0.10 per Jeff standing proposal. 30d +$13 / 14d
+    # thin +$0.23, 92% cap-blocked; small trim toward optimum.
+    "0x511e60d32a1fdcafb46bae7f43cfab0a87040713": 1.00
     # 2026-09-01 AUTO-DISCOVERED leader, NOT pinned. Explicit weight override to
     # cut its auto-Sharpe weight 1.32 -> 0.85 (-0.47, within the +/-0.5/run bound).
     # It has been trading LIVE since ~08-31 on zero backtest evidence, because
@@ -750,7 +780,10 @@ discovery:
     # still positive -- i.e. the HYPE short actually realized, not just marked
     # better. Leaving the explicit entry in place is also the only brake:
     # deleting this line falls back to auto-Sharpe and BUMPS it to ~1.88.
-    "0x9636dc553bb96c4870529af4c60f6701fab001dd": 0.45
+    # 2026-09-30 Quorra: DROPPED per Jeff standing proposal. 30d -$121 net,
+    # $0 perp on all 11 dexes, silent 12+ days. Engine already excludes;
+    # this comment-out is config hygiene. Reversible: uncomment to restore.
+    # "0x9636dc553bb96c4870529af4c60f6701fab001dd": 0.45
 
     # 0xa3f996f2 PINNED 2026-09-06 at its current auto weight. It was dropped
     # from always_follow 2026-08-30 as an unfunded dead pin ($0 equity, 0 fills);
@@ -800,7 +833,9 @@ discovery:
     # back. Keeping the explicit entry is the brake -- deleting the line falls
     # back to auto-Sharpe and BUMPS it. 0.60 * $30 = $18.00, clear of
     # min_per_trade_usd $10, so this brakes without silently muting.
-    "0xa3f996f2ec2b1fe240a57543bbfdb4d9d5804d04": 0.60
+    # 2026-09-30 Quorra: DROPPED per Jeff standing proposal. 30d -$62 net,
+    # negative every cap. Reversible: uncomment to restore.
+    # "0xa3f996f2ec2b1fe240a57543bbfdb4d9d5804d04": 0.60
     # 2026-09-08 AUTO-DISCOVERED leader, NOT pinned. Explicit weight override to
     # cut its auto-Sharpe weight 1.16 -> 0.70 (-0.46, within the +/-0.5/run bound).
     # Same blind spot as 0x9636dc55/0xa3f996f2: it has been trading LIVE at 1.16
@@ -849,7 +884,9 @@ discovery:
     # $842.12, ONE position (xyz:SP500 short -2.25 @ 20x cross), unrealized
     # -$17.10 = -2.0% of equity. 20.4x is 2.1x the next-highest leader.
     # Pre-committed trigger unchanged: next NEGATIVE net window = cut to 0.
-    "0x7d7c7d28e2061b30887c94b0623ed49c59f6d19c": 0.70
+    # 2026-09-30 Quorra: DROPPED per Jeff standing proposal. 30d -$10 net,
+    # $0 perp on all 11 dexes, silent 20+ days. Reversible: uncomment.
+    # "0x7d7c7d28e2061b30887c94b0623ed49c59f6d19c": 0.70
     # Dropped from always_follow 2026-07-20 (0 trades / dead slot).
     # "0xb7671719f8c8e2e51952cd1521f52ec2a5242dc8": 1.2
 
@@ -898,7 +935,7 @@ risk:
   # PR #30 auto-close: validated 2026-05-21 — WLD orphan correctly detected,
   # detection logic + closing path both work. Switching from alert-only to
   # autonomous close so we don't need operator hand-holding on each event.
-  leader_exit_auto_close: true
+  leader_exit_auto_close: false
   leader_exit_debounce_cycles: 2
   # Manual positions opened outside the bot. LeaderReconciler skips these so
   # operator-managed trades don't get flagged as orphans + auto-closed.
