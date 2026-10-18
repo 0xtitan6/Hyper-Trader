@@ -508,7 +508,60 @@ discovery:
     # 7d AND 30d perp copysim = drop from always_follow entirely.
     # Mute check: $30 * 0.60 = $18.00 clip, clears $10 min, under $120 max. No
     # silent mute-by-rounding.
-    "0x9551e7d4cd963558bb9882aecc74f549262e217f": 0.60
+    # 2026-10-17: 0.60 -> 0.40. SKHX blew up: on 2026-10-14 the leader took a
+    # single-day realized loss of -$151,125.46 on xyz:SKHX (305 fills). Our
+    # 0.60 mirror copied 11 of those fills for -$90.55 realized the same day.
+    # The 09-19 cut-not-drop clause ("next window with NEGATIVE 7d AND 30d
+    # perp copysim = drop") now fires on evidence: attributed copy-PnL on this
+    # leader is -$81.71 over 30d (all xyz:SKHX, zero positive on any other
+    # coin) and -$90.55 over 7d (entirely from the 10-14 blow-up). 60d leader
+    # realized is still +$32,225 on perps because the SKHX pattern printed
+    # multiple +$2-6k green days through Aug-Sep — the edge is lumpy, not
+    # dead. The leader has already ROTATED off SKHX: xyz dex now carries
+    # xyz:SP500 short szi -25.83 @ 10x and xyz:BE long szi 86.18 @ 5x,
+    # combined unrealized +$2,947 across the two. That is a new, uncopyable
+    # window: our xyz dex is $25.97 equity, 100% margin-used ($77 notional on
+    # TSLA+SPCX), $0 withdrawable — the "SKHX unmute by xyz headroom" premise
+    # from the stale cron prompt is false in our live state. CUT, not DROP,
+    # for three reasons: (a) the leader is alive and funded ($26.7k xyz
+    # equity, positive unrealized), not a bag-holder; (b) the realized-$32k
+    # 60d history means the drop decision deserves a second negative window
+    # on the NEW symbols (SP500/BE) rather than snap-dropping on one
+    # catastrophic day; (c) if we drop and the engine re-adopts via
+    # auto-discovery it will pin at the Sharpe weight, which is HIGHER than
+    # 0.40 given the 60d realized line. -0.20 is within the +/-0.5/run bound
+    # and well short of the mute boundary (0.34 at fixed_usd $30, min $10).
+    # Mute check: $30 * 0.40 = $12.00 clip, clears min_per_trade_usd $10
+    # after floor-rounding, under max $120. Real size cut, NOT a silent
+    # mute-by-rounding.
+    # Pre-commitment: next window with NEGATIVE 30d perp copy-attributed PnL
+    # on this leader AND no fresh positive window on a non-SKHX symbol =
+    # DROP from always_follow entirely.
+    # 2026-10-18: 0.40 -> 0.10 (effective mute). Leader is in a sustained
+    # multi-day blow-up. HL portfolio API: 24h -$6,598, 7d -$204,852, 30d
+    # -$211,424 on a $421k book = -48.6% weekly drawdown. 5d userFillsByTime:
+    # xyz:SKHX -$151,125 on 2026-10-14 (314 fills), partially offset by
+    # xyz:CL +$3,023 and xyz:GOLD +$2,683 (ROTATION, not recovery -- a $5.7k
+    # positive on non-SKHX symbols is swamped 25x by the SKHX bleed). Live
+    # position left is xyz:SP500 short -25.83 @ 10x, +$3,217 unrealized -
+    # residual, not conviction. Last fill 4.5h ago, so NOT silent, but still
+    # trading into the drawdown. We have NOT copy-acted on any of this: 24h
+    # journal shows 33 leader_fills on xyz:BE, 33 intent_skipped as
+    # 'leader_closing_we_are_flat' - we were never in the trade, and our xyz
+    # dex has $16.53 equity (hip3 total), no reachable headroom to copy any
+    # of the catastrophic SKHX, CL, GOLD, SP500 or BE fills. The drop
+    # pre-commitment is NOT literally satisfied (CL/GOLD printed fresh
+    # positive non-SKHX windows), but those windows are theoretically-
+    # positive and empirically-unreachable - our mirror cannot act on them.
+    # Cut to the mute floor rather than drop: 0.10 * $30 = $3 clip, well
+    # below min_per_trade_usd $10 -> silent-muted by rounding, leaves the
+    # slot measurable, avoids the engine re-adopting at a higher
+    # auto-sharpe weight. 0.40 -> 0.10 = -0.30, within +/-0.5 bound.
+    # Next re-up trigger: TWO consecutive 7d windows with POSITIVE leader-
+    # level perp pnl on a copyable base-dex symbol AND our reachable copy
+    # PnL on this leader >= $0 in that window. One good day on an
+    # unreachable xyz symbol does NOT re-up.
+    "0x9551e7d4cd963558bb9882aecc74f549262e217f": 0.10
     # 2026-08-25: pinned this run (see always_follow). Weight set to 1.27,
     # which is EXACTLY where auto-sharpe weighting already had it
     # (clip(sharpe+1.0) on its realized sharpe 0.27 = 1.27). leader_weights
@@ -709,6 +762,20 @@ discovery:
     # SAME window. If the next window clears both, bump 1.10 -> 1.50.
     # 2026-09-30 Quorra: -0.10 per Jeff standing proposal. 30d +$13 / 14d
     # thin +$0.23, 92% cap-blocked; small trim toward optimum.
+    # 2026-10-18: HOLD 1.00. No change. Evidence:
+    #   Bump trigger (sharpe>=0.2 AND maxDD<0.3x net): NOT met. HL 7d
+    #     closedPnl +$130.58 on 136 fills (near breakeven). Reachable copy
+    #     PnL on this leader remains ~-$26 (perp-only, 09-26 copysim audit),
+    #     unchanged in direction.
+    #   Cut trigger: NOT clearly indicated. Base-dex eq $0 and xyz-dex eq
+    #     $67 mean our mirror is already cap-blocked on this leader; a
+    #     weight cut doesn't reduce exposure because the cap is doing the
+    #     work. Memory [[weight-is-the-cap-lever]]: at a binding cap,
+    #     dropping weight DECREASES realized copy PnL further by shrinking
+    #     the few clips that DO fit.
+    # 24h journal: 3 leader_fills on #71860, all intent_skipped as
+    # 'market_type' - we're already filtering their outcome-market flow.
+    # No action needed.
     "0x511e60d32a1fdcafb46bae7f43cfab0a87040713": 1.00
     # 2026-09-01 AUTO-DISCOVERED leader, NOT pinned. Explicit weight override to
     # cut its auto-Sharpe weight 1.32 -> 0.85 (-0.47, within the +/-0.5/run bound).
