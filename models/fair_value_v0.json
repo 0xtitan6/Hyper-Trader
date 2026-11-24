@@ -1,0 +1,813 @@
+{
+  "run_epoch_utc": 1790296333,
+  "pm_snapshot_file": "state/polymarket/markets_1790296633.jsonl",
+  "pm_market_count": 100,
+  "pm_categories_observed": "politics only (98/100 = 2028 US presidential nomination/election; 2 misc / Xi Jinping)",
+  "hl_coins_analyzed": 20,
+  "hl_categories": "sports only (13 UEFA Nations League soccer legs, 6 NFL match legs, 1 EPL tournament leg)",
+  "strong_matches_ge85": 0,
+  "weak_matches_70_84": 0,
+  "no_match_below70": 20,
+  "tradeable_pairs": 0,
+  "verdict": "KILLED_v0_no_data_overlap",
+  "matches": [
+    {
+      "coin": "#44851",
+      "body": 44851,
+      "hl_question": "Croatia beat Czechia",
+      "hl_bits": {
+        "kind": "match_participant",
+        "participant": "Croatia",
+        "opponent": "Czechia",
+        "competition": "UEFA Nations League",
+        "side": "NO"
+      },
+      "hl_mid": 0.55462,
+      "hl_bid": 0.55233,
+      "hl_ask": 0.55691,
+      "hl_spread_bps": 82.5791,
+      "match_score": 32.56,
+      "match_tier": "skip",
+      "pm_question": "Will Chris Murphy win the 2028 Democratic presidential nomination?",
+      "pm_slug": "will-chris-murphy-win-the-2028-democratic-presidential-nomination",
+      "pm_id": "559691",
+      "pm_yes_price": 0.0045,
+      "pm_no_price": 0.9955,
+      "pm_volume": "17409101.077825997",
+      "pm_liquidity": "1854818.6101",
+      "divergence_bps": -4428.7,
+      "top3_matches": [
+        {
+          "q": "Will Chris Murphy win the 2028 Democratic presidential nomination?",
+          "score": 32.56
+        },
+        {
+          "q": "Will Mitch Landrieu win the 2028 Democratic presidential nomination?",
+          "score": 31.82
+        },
+        {
+          "q": "Will Gretchen Whitmer win the 2028 Democratic presidential nomination?",
+          "score": 31.11
+        }
+      ]
+    },
+    {
+      "coin": "#44850",
+      "body": 44850,
+      "hl_question": "Croatia beat Czechia",
+      "hl_bits": {
+        "kind": "match_participant",
+        "participant": "Croatia",
+        "opponent": "Czechia",
+        "competition": "UEFA Nations League",
+        "side": "YES"
+      },
+      "hl_mid": 0.44538,
+      "hl_bid": 0.44309,
+      "hl_ask": 0.44767,
+      "hl_spread_bps": 102.8335,
+      "match_score": 32.56,
+      "match_tier": "skip",
+      "pm_question": "Will Chris Murphy win the 2028 Democratic presidential nomination?",
+      "pm_slug": "will-chris-murphy-win-the-2028-democratic-presidential-nomination",
+      "pm_id": "559691",
+      "pm_yes_price": 0.0045,
+      "pm_no_price": 0.9955,
+      "pm_volume": "17409101.077825997",
+      "pm_liquidity": "1854818.6101",
+      "divergence_bps": 979733.3,
+      "top3_matches": [
+        {
+          "q": "Will Chris Murphy win the 2028 Democratic presidential nomination?",
+          "score": 32.56
+        },
+        {
+          "q": "Will Mitch Landrieu win the 2028 Democratic presidential nomination?",
+          "score": 31.82
+        },
+        {
+          "q": "Will Gretchen Whitmer win the 2028 Democratic presidential nomination?",
+          "score": 31.11
+        }
+      ]
+    },
+    {
+      "coin": "#45160",
+      "body": 45160,
+      "hl_question": "New York Giants beat Tennessee Titans",
+      "hl_bits": {
+        "kind": "match_winner",
+        "A": "New York Giants",
+        "B": "Tennessee Titans",
+        "competition": "NFL",
+        "side": "YES"
+      },
+      "hl_mid": 0.5610649999999999,
+      "hl_bid": 0.56106,
+      "hl_ask": 0.56107,
+      "hl_spread_bps": 0.1782,
+      "match_score": 35.79,
+      "match_tier": "skip",
+      "pm_question": "Will Glenn Youngkin win the 2028 US Presidential Election?",
+      "pm_slug": "will-glenn-youngkin-win-the-2028-us-presidential-election",
+      "pm_id": "561238",
+      "pm_yes_price": 0.0015,
+      "pm_no_price": 0.9985,
+      "pm_volume": "28203128.46864299",
+      "pm_liquidity": "739645.60343",
+      "divergence_bps": 3730433.3,
+      "top3_matches": [
+        {
+          "q": "Will Glenn Youngkin win the 2028 US Presidential Election?",
+          "score": 35.79
+        },
+        {
+          "q": "Will Gavin Newsom win the 2028 US Presidential Election?",
+          "score": 34.41
+        },
+        {
+          "q": "Will Ron DeSantis win the 2028 US Presidential Election?",
+          "score": 34.41
+        }
+      ]
+    },
+    {
+      "coin": "#43261",
+      "body": 43261,
+      "hl_question": "Italy beat Belgium",
+      "hl_bits": {
+        "kind": "match_participant",
+        "participant": "Italy",
+        "opponent": "Belgium",
+        "competition": "UEFA Nations League",
+        "side": "NO"
+      },
+      "hl_mid": 0.570155,
+      "hl_bid": 0.57011,
+      "hl_ask": 0.5702,
+      "hl_spread_bps": 1.5785,
+      "match_score": 27.4,
+      "match_tier": "skip",
+      "pm_question": "Will Nikki Haley win the 2028 US Presidential Election?",
+      "pm_slug": "will-nikki-haley-win-the-2028-us-presidential-election",
+      "pm_id": "561245",
+      "pm_yes_price": 0.0005,
+      "pm_no_price": 0.9995,
+      "pm_volume": "30172103.75704699",
+      "pm_liquidity": "1890967.30484",
+      "divergence_bps": -4295.6,
+      "top3_matches": [
+        {
+          "q": "Will Nikki Haley win the 2028 US Presidential Election?",
+          "score": 27.4
+        },
+        {
+          "q": "Will Andy Beshear win the 2028 US Presidential Election?",
+          "score": 27.03
+        },
+        {
+          "q": "Will Alex Padilla win the 2028 US Presidential Election?",
+          "score": 27.03
+        }
+      ]
+    },
+    {
+      "coin": "#43260",
+      "body": 43260,
+      "hl_question": "Italy beat Belgium",
+      "hl_bits": {
+        "kind": "match_participant",
+        "participant": "Italy",
+        "opponent": "Belgium",
+        "competition": "UEFA Nations League",
+        "side": "YES"
+      },
+      "hl_mid": 0.42984500000000003,
+      "hl_bid": 0.4298,
+      "hl_ask": 0.42989,
+      "hl_spread_bps": 2.0938,
+      "match_score": 27.4,
+      "match_tier": "skip",
+      "pm_question": "Will Nikki Haley win the 2028 US Presidential Election?",
+      "pm_slug": "will-nikki-haley-win-the-2028-us-presidential-election",
+      "pm_id": "561245",
+      "pm_yes_price": 0.0005,
+      "pm_no_price": 0.9995,
+      "pm_volume": "30172103.75704699",
+      "pm_liquidity": "1890967.30484",
+      "divergence_bps": 8586900.0,
+      "top3_matches": [
+        {
+          "q": "Will Nikki Haley win the 2028 US Presidential Election?",
+          "score": 27.4
+        },
+        {
+          "q": "Will Andy Beshear win the 2028 US Presidential Election?",
+          "score": 27.03
+        },
+        {
+          "q": "Will Alex Padilla win the 2028 US Presidential Election?",
+          "score": 27.03
+        }
+      ]
+    },
+    {
+      "coin": "#46620",
+      "body": 46620,
+      "hl_question": "Carolina Panthers beat Cleveland Browns",
+      "hl_bits": {
+        "kind": "match_winner",
+        "A": "Carolina Panthers",
+        "B": "Cleveland Browns",
+        "competition": "NFL",
+        "side": "YES"
+      },
+      "hl_mid": 0.57353,
+      "hl_bid": 0.56641,
+      "hl_ask": 0.58065,
+      "hl_spread_bps": 248.2869,
+      "match_score": 39.58,
+      "match_tier": "skip",
+      "pm_question": "Will Jalen Brunson win the 2028 US Presidential Election?",
+      "pm_slug": "will-jalen-brunson-win-the-2028-us-presidential-election",
+      "pm_id": "561265",
+      "pm_yes_price": 0.0005,
+      "pm_no_price": 0.9995,
+      "pm_volume": "2710577.0446740007",
+      "pm_liquidity": "2161403.07699",
+      "divergence_bps": 11460600.0,
+      "top3_matches": [
+        {
+          "q": "Will Jalen Brunson win the 2028 US Presidential Election?",
+          "score": 39.58
+        },
+        {
+          "q": "Will Josh Shapiro win the 2028 Democratic presidential nomination?",
+          "score": 38.1
+        },
+        {
+          "q": "Will Tucker Carlson win the 2028 US Presidential Election?",
+          "score": 37.11
+        }
+      ]
+    },
+    {
+      "coin": "#44711",
+      "body": 44711,
+      "hl_question": "Spain beat England",
+      "hl_bits": {
+        "kind": "match_participant",
+        "participant": "Spain",
+        "opponent": "England",
+        "competition": "UEFA Nations League",
+        "side": "NO"
+      },
+      "hl_mid": 0.595295,
+      "hl_bid": 0.59202,
+      "hl_ask": 0.59857,
+      "hl_spread_bps": 110.0295,
+      "match_score": 35.56,
+      "match_tier": "skip",
+      "pm_question": "Xi Jinping out before 2027?",
+      "pm_slug": "xi-jinping-out-before-2027",
+      "pm_id": "559651",
+      "pm_yes_price": 0.044,
+      "pm_no_price": 0.956,
+      "pm_volume": "13918184.019644996",
+      "pm_liquidity": "538545.43889",
+      "divergence_bps": -3773.1,
+      "top3_matches": [
+        {
+          "q": "Xi Jinping out before 2027?",
+          "score": 35.56
+        },
+        {
+          "q": "Will Abigail Spanberger win the 2028 US Presidential Election?",
+          "score": 30.0
+        },
+        {
+          "q": "Will Gavin Newsom win the 2028 US Presidential Election?",
+          "score": 29.73
+        }
+      ]
+    },
+    {
+      "coin": "#44710",
+      "body": 44710,
+      "hl_question": "Spain beat England",
+      "hl_bits": {
+        "kind": "match_participant",
+        "participant": "Spain",
+        "opponent": "England",
+        "competition": "UEFA Nations League",
+        "side": "YES"
+      },
+      "hl_mid": 0.404705,
+      "hl_bid": 0.40143,
+      "hl_ask": 0.40798,
+      "hl_spread_bps": 161.8463,
+      "match_score": 35.56,
+      "match_tier": "skip",
+      "pm_question": "Xi Jinping out before 2027?",
+      "pm_slug": "xi-jinping-out-before-2027",
+      "pm_id": "559651",
+      "pm_yes_price": 0.044,
+      "pm_no_price": 0.956,
+      "pm_volume": "13918184.019644996",
+      "pm_liquidity": "538545.43889",
+      "divergence_bps": 81978.4,
+      "top3_matches": [
+        {
+          "q": "Xi Jinping out before 2027?",
+          "score": 35.56
+        },
+        {
+          "q": "Will Abigail Spanberger win the 2028 US Presidential Election?",
+          "score": 30.0
+        },
+        {
+          "q": "Will Gavin Newsom win the 2028 US Presidential Election?",
+          "score": 29.73
+        }
+      ]
+    },
+    {
+      "coin": "#14741",
+      "body": 14741,
+      "hl_question": "Manchester City win English Premier League",
+      "hl_bits": {
+        "kind": "tournament",
+        "participant": "Manchester City",
+        "competition": "English Premier League",
+        "side": "NO"
+      },
+      "hl_mid": 0.6139950000000001,
+      "hl_bid": 0.61399,
+      "hl_ask": 0.614,
+      "hl_spread_bps": 0.1629,
+      "match_score": 44.9,
+      "match_tier": "skip",
+      "pm_question": "Will Pete Hegseth win the 2028 US Presidential Election?",
+      "pm_slug": "will-pete-hegseth-win-the-2028-us-presidential-election",
+      "pm_id": "561264",
+      "pm_yes_price": 0.0005,
+      "pm_no_price": 0.9995,
+      "pm_volume": "10340157.636485996",
+      "pm_liquidity": "1337924.87242",
+      "divergence_bps": -3857.0,
+      "top3_matches": [
+        {
+          "q": "Will Pete Hegseth win the 2028 US Presidential Election?",
+          "score": 44.9
+        },
+        {
+          "q": "Will LeBron James win the 2028 US Presidential Election?",
+          "score": 40.82
+        },
+        {
+          "q": "Will JD Vance win the 2028 US Presidential Election?",
+          "score": 40.43
+        }
+      ]
+    },
+    {
+      "coin": "#14740",
+      "body": 14740,
+      "hl_question": "Manchester City win English Premier League",
+      "hl_bits": {
+        "kind": "tournament",
+        "participant": "Manchester City",
+        "competition": "English Premier League",
+        "side": "YES"
+      },
+      "hl_mid": 0.38600500000000004,
+      "hl_bid": 0.386,
+      "hl_ask": 0.38601,
+      "hl_spread_bps": 0.2591,
+      "match_score": 44.9,
+      "match_tier": "skip",
+      "pm_question": "Will Pete Hegseth win the 2028 US Presidential Election?",
+      "pm_slug": "will-pete-hegseth-win-the-2028-us-presidential-election",
+      "pm_id": "561264",
+      "pm_yes_price": 0.0005,
+      "pm_no_price": 0.9995,
+      "pm_volume": "10340157.636485996",
+      "pm_liquidity": "1337924.87242",
+      "divergence_bps": 7710100.0,
+      "top3_matches": [
+        {
+          "q": "Will Pete Hegseth win the 2028 US Presidential Election?",
+          "score": 44.9
+        },
+        {
+          "q": "Will LeBron James win the 2028 US Presidential Election?",
+          "score": 40.82
+        },
+        {
+          "q": "Will JD Vance win the 2028 US Presidential Election?",
+          "score": 40.43
+        }
+      ]
+    },
+    {
+      "coin": "#44730",
+      "body": 44730,
+      "hl_question": "Slovenia beat Scotland",
+      "hl_bits": {
+        "kind": "match_participant",
+        "participant": "Slovenia",
+        "opponent": "Scotland",
+        "competition": "UEFA Nations League",
+        "side": "YES"
+      },
+      "hl_mid": 0.35597999999999996,
+      "hl_bid": 0.35096,
+      "hl_ask": 0.361,
+      "hl_spread_bps": 282.0383,
+      "match_score": 33.33,
+      "match_tier": "skip",
+      "pm_question": "Will Elissa Slotkin win the 2028 Democratic presidential nomination?",
+      "pm_slug": "will-elissa-slotkin-win-the-2028-democratic-presidential-nomination",
+      "pm_id": "559699",
+      "pm_yes_price": 0.0015,
+      "pm_no_price": 0.9985,
+      "pm_volume": "1614288.201781",
+      "pm_liquidity": "1117307.3124",
+      "divergence_bps": 2363200.0,
+      "top3_matches": [
+        {
+          "q": "Will Elissa Slotkin win the 2028 Democratic presidential nomination?",
+          "score": 33.33
+        },
+        {
+          "q": "Will Glenn Youngkin win the 2028 US Presidential Election?",
+          "score": 32.5
+        },
+        {
+          "q": "Will Elissa Slotkin win the 2028 US Presidential Election?",
+          "score": 32.5
+        }
+      ]
+    },
+    {
+      "coin": "#44650",
+      "body": 44650,
+      "hl_question": "Sweden beat Romania",
+      "hl_bits": {
+        "kind": "match_participant",
+        "participant": "Sweden",
+        "opponent": "Romania",
+        "competition": "UEFA Nations League",
+        "side": "YES"
+      },
+      "hl_mid": 0.6582749999999999,
+      "hl_bid": 0.65827,
+      "hl_ask": 0.65828,
+      "hl_spread_bps": 0.1519,
+      "match_score": 33.77,
+      "match_tier": "skip",
+      "pm_question": "Will Zohran Mamdani win the 2028 US Presidential Election?",
+      "pm_slug": "will-zohran-mamdani-win-the-2028-us-presidential-election",
+      "pm_id": "561256",
+      "pm_yes_price": 0.0005,
+      "pm_no_price": 0.9995,
+      "pm_volume": "22202620.77891299",
+      "pm_liquidity": "1703997.97905",
+      "divergence_bps": 13155500.0,
+      "top3_matches": [
+        {
+          "q": "Will Zohran Mamdani win the 2028 US Presidential Election?",
+          "score": 33.77
+        },
+        {
+          "q": "Will Tim Walz win the 2028 Democratic presidential nomination?",
+          "score": 32.1
+        },
+        {
+          "q": "Will Roy Cooper win the 2028 Democratic presidential nomination?",
+          "score": 31.33
+        }
+      ]
+    },
+    {
+      "coin": "#44751",
+      "body": 44751,
+      "hl_question": "Scotland beat Slovenia",
+      "hl_bits": {
+        "kind": "match_participant",
+        "participant": "Scotland",
+        "opponent": "Slovenia",
+        "competition": "UEFA Nations League",
+        "side": "NO"
+      },
+      "hl_mid": 0.658425,
+      "hl_bid": 0.65696,
+      "hl_ask": 0.65989,
+      "hl_spread_bps": 44.5001,
+      "match_score": 33.33,
+      "match_tier": "skip",
+      "pm_question": "Will Elissa Slotkin win the 2028 Democratic presidential nomination?",
+      "pm_slug": "will-elissa-slotkin-win-the-2028-democratic-presidential-nomination",
+      "pm_id": "559699",
+      "pm_yes_price": 0.0015,
+      "pm_no_price": 0.9985,
+      "pm_volume": "1614288.201781",
+      "pm_liquidity": "1117307.3124",
+      "divergence_bps": -3405.9,
+      "top3_matches": [
+        {
+          "q": "Will Elissa Slotkin win the 2028 Democratic presidential nomination?",
+          "score": 33.33
+        },
+        {
+          "q": "Will Glenn Youngkin win the 2028 US Presidential Election?",
+          "score": 32.5
+        },
+        {
+          "q": "Will Elissa Slotkin win the 2028 US Presidential Election?",
+          "score": 32.5
+        }
+      ]
+    },
+    {
+      "coin": "#44750",
+      "body": 44750,
+      "hl_question": "Scotland beat Slovenia",
+      "hl_bits": {
+        "kind": "match_participant",
+        "participant": "Scotland",
+        "opponent": "Slovenia",
+        "competition": "UEFA Nations League",
+        "side": "YES"
+      },
+      "hl_mid": 0.341575,
+      "hl_bid": 0.34011,
+      "hl_ask": 0.34304,
+      "hl_spread_bps": 85.7791,
+      "match_score": 33.33,
+      "match_tier": "skip",
+      "pm_question": "Will Elissa Slotkin win the 2028 Democratic presidential nomination?",
+      "pm_slug": "will-elissa-slotkin-win-the-2028-democratic-presidential-nomination",
+      "pm_id": "559699",
+      "pm_yes_price": 0.0015,
+      "pm_no_price": 0.9985,
+      "pm_volume": "1614288.201781",
+      "pm_liquidity": "1117307.3124",
+      "divergence_bps": 2267166.7,
+      "top3_matches": [
+        {
+          "q": "Will Elissa Slotkin win the 2028 Democratic presidential nomination?",
+          "score": 33.33
+        },
+        {
+          "q": "Will Glenn Youngkin win the 2028 US Presidential Election?",
+          "score": 32.5
+        },
+        {
+          "q": "Will Elissa Slotkin win the 2028 US Presidential Election?",
+          "score": 32.5
+        }
+      ]
+    },
+    {
+      "coin": "#45131",
+      "body": 45131,
+      "hl_question": "Green Bay Packers beat Atlanta Falcons",
+      "hl_bits": {
+        "kind": "match_winner",
+        "A": "Green Bay Packers",
+        "B": "Atlanta Falcons",
+        "competition": "NFL",
+        "side": "NO"
+      },
+      "hl_mid": 0.23552499999999998,
+      "hl_bid": 0.22855,
+      "hl_ask": 0.2425,
+      "hl_spread_bps": 592.2938,
+      "match_score": 40.86,
+      "match_tier": "skip",
+      "pm_question": "Will Greg Abbott win the 2028 US Presidential Election?",
+      "pm_slug": "will-greg-abbott-win-the-2028-us-presidential-election",
+      "pm_id": "561249",
+      "pm_yes_price": 0.0035,
+      "pm_no_price": 0.9965,
+      "pm_volume": "35386539.56088209",
+      "pm_liquidity": "2226249.88721",
+      "divergence_bps": -7636.5,
+      "top3_matches": [
+        {
+          "q": "Will Greg Abbott win the 2028 US Presidential Election?",
+          "score": 40.86
+        },
+        {
+          "q": "Will Tucker Carlson win the 2028 US Presidential Election?",
+          "score": 39.58
+        },
+        {
+          "q": "Will Andy Beshear win the 2028 US Presidential Election?",
+          "score": 38.3
+        }
+      ]
+    },
+    {
+      "coin": "#45130",
+      "body": 45130,
+      "hl_question": "Green Bay Packers beat Atlanta Falcons",
+      "hl_bits": {
+        "kind": "match_winner",
+        "A": "Green Bay Packers",
+        "B": "Atlanta Falcons",
+        "competition": "NFL",
+        "side": "YES"
+      },
+      "hl_mid": 0.764475,
+      "hl_bid": 0.7575,
+      "hl_ask": 0.77145,
+      "hl_spread_bps": 182.4782,
+      "match_score": 40.86,
+      "match_tier": "skip",
+      "pm_question": "Will Greg Abbott win the 2028 US Presidential Election?",
+      "pm_slug": "will-greg-abbott-win-the-2028-us-presidential-election",
+      "pm_id": "561249",
+      "pm_yes_price": 0.0035,
+      "pm_no_price": 0.9965,
+      "pm_volume": "35386539.56088209",
+      "pm_liquidity": "2226249.88721",
+      "divergence_bps": 2174214.3,
+      "top3_matches": [
+        {
+          "q": "Will Greg Abbott win the 2028 US Presidential Election?",
+          "score": 40.86
+        },
+        {
+          "q": "Will Tucker Carlson win the 2028 US Presidential Election?",
+          "score": 39.58
+        },
+        {
+          "q": "Will Andy Beshear win the 2028 US Presidential Election?",
+          "score": 38.3
+        }
+      ]
+    },
+    {
+      "coin": "#44950",
+      "body": 44950,
+      "hl_question": "Switzerland beat N.Macedonia",
+      "hl_bits": {
+        "kind": "match_participant",
+        "participant": "Switzerland",
+        "opponent": "N.Macedonia",
+        "competition": "UEFA Nations League",
+        "side": "YES"
+      },
+      "hl_mid": 0.6944250000000001,
+      "hl_bid": 0.69442,
+      "hl_ask": 0.69443,
+      "hl_spread_bps": 0.144,
+      "match_score": 36.14,
+      "match_tier": "skip",
+      "pm_question": "Will JB Pritzker win the 2028 US Presidential Election?",
+      "pm_slug": "will-jb-pritzker-win-the-2028-us-presidential-election",
+      "pm_id": "561241",
+      "pm_yes_price": 0.0045,
+      "pm_no_price": 0.9955,
+      "pm_volume": "13038065.263394004",
+      "pm_liquidity": "481414.88654",
+      "divergence_bps": 1533166.7,
+      "top3_matches": [
+        {
+          "q": "Will JB Pritzker win the 2028 US Presidential Election?",
+          "score": 36.14
+        },
+        {
+          "q": "Will Zohran Mamdani win the 2028 US Presidential Election?",
+          "score": 34.88
+        },
+        {
+          "q": "Will Jon Stewart win the 2028 Democratic presidential nomination?",
+          "score": 34.41
+        }
+      ]
+    },
+    {
+      "coin": "#43470",
+      "body": 43470,
+      "hl_question": "France beat Turkiye",
+      "hl_bits": {
+        "kind": "match_participant",
+        "participant": "France",
+        "opponent": "Turkiye",
+        "competition": "UEFA Nations League",
+        "side": "YES"
+      },
+      "hl_mid": 0.7087,
+      "hl_bid": 0.70703,
+      "hl_ask": 0.71037,
+      "hl_spread_bps": 47.1285,
+      "match_score": 30.43,
+      "match_tier": "skip",
+      "pm_question": "Xi Jinping out before 2027?",
+      "pm_slug": "xi-jinping-out-before-2027",
+      "pm_id": "559651",
+      "pm_yes_price": 0.044,
+      "pm_no_price": 0.956,
+      "pm_volume": "13918184.019644996",
+      "pm_liquidity": "538545.43889",
+      "divergence_bps": 151068.2,
+      "top3_matches": [
+        {
+          "q": "Xi Jinping out before 2027?",
+          "score": 30.43
+        },
+        {
+          "q": "Will Candace Owens win the 2028 US Presidential Election?",
+          "score": 28.95
+        },
+        {
+          "q": "Will Mark Kelly win the 2028 Democratic presidential nomination?",
+          "score": 28.92
+        }
+      ]
+    },
+    {
+      "coin": "#43471",
+      "body": 43471,
+      "hl_question": "France beat Turkiye",
+      "hl_bits": {
+        "kind": "match_participant",
+        "participant": "France",
+        "opponent": "Turkiye",
+        "competition": "UEFA Nations League",
+        "side": "NO"
+      },
+      "hl_mid": 0.2913,
+      "hl_bid": 0.28963,
+      "hl_ask": 0.29297,
+      "hl_spread_bps": 114.6584,
+      "match_score": 30.43,
+      "match_tier": "skip",
+      "pm_question": "Xi Jinping out before 2027?",
+      "pm_slug": "xi-jinping-out-before-2027",
+      "pm_id": "559651",
+      "pm_yes_price": 0.044,
+      "pm_no_price": 0.956,
+      "pm_volume": "13918184.019644996",
+      "pm_liquidity": "538545.43889",
+      "divergence_bps": -6952.9,
+      "top3_matches": [
+        {
+          "q": "Xi Jinping out before 2027?",
+          "score": 30.43
+        },
+        {
+          "q": "Will Candace Owens win the 2028 US Presidential Election?",
+          "score": 28.95
+        },
+        {
+          "q": "Will Mark Kelly win the 2028 Democratic presidential nomination?",
+          "score": 28.92
+        }
+      ]
+    },
+    {
+      "coin": "#45190",
+      "body": 45190,
+      "hl_question": "Detroit Lions beat New York Jets",
+      "hl_bits": {
+        "kind": "match_winner",
+        "A": "Detroit Lions",
+        "B": "New York Jets",
+        "competition": "NFL",
+        "side": "YES"
+      },
+      "hl_mid": 0.718845,
+      "hl_bid": 0.71884,
+      "hl_ask": 0.71885,
+      "hl_spread_bps": 0.1391,
+      "match_score": 38.78,
+      "match_tier": "skip",
+      "pm_question": "Will LeBron James win the 2028 Democratic presidential nomination?",
+      "pm_slug": "will-lebron-james-win-the-2028-democratic-presidential-nomination",
+      "pm_id": "559681",
+      "pm_yes_price": 0.0005,
+      "pm_no_price": 0.9995,
+      "pm_volume": "43986275.61742705",
+      "pm_liquidity": "2890786.70277",
+      "divergence_bps": 14366900.0,
+      "top3_matches": [
+        {
+          "q": "Will LeBron James win the 2028 Democratic presidential nomination?",
+          "score": 38.78
+        },
+        {
+          "q": "Will Ron DeSantis win the 2028 US Presidential Election?",
+          "score": 36.36
+        },
+        {
+          "q": "Will LeBron James win the 2028 US Presidential Election?",
+          "score": 36.36
+        }
+      ]
+    }
+  ]
+}
